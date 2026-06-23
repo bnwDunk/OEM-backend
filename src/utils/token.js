@@ -8,6 +8,7 @@ function signAccessToken(user) {
       sub: String(user.id),
       email: user.email,
       role: user.role,
+      department_id: user.departmentId,
       token_type: 'access_token',
     },
     env.jwt.accessSecret,
