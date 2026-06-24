@@ -55,6 +55,7 @@ mysql -u root -p oem_app < database/migrations/002_oem_workflow_tables.sql
 mysql -u root -p oem_app < database/migrations/003_admin_dashboard.sql
 mysql -u root -p oem_app < database/migrations/004_seed_standard_user.sql
 mysql -u root -p oem_app < database/migrations/005_flow_template_parent.sql
+mysql -u root -p oem_app < database/migrations/006_flow_template_status.sql
 ```
 
 ## Notes
