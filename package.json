@@ -5,6 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "node --watch src/server.js",
+    "migrate:prod": "node database/ensure_production_schema.js",
     "start": "node src/server.js",
     "sync:workflow": "node database/sync_oem_flow_template.js"
   },
