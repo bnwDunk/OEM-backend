@@ -69,7 +69,6 @@ async function listOverview(req, res, next) {
        ) AS first_phase
          ON first_phase.template_id = customer_workflows.template_id
        WHERE customers.status = 'active'
-       GROUP BY customers.id
        ORDER BY customers.updated_at DESC, customers.id DESC`,
     )
 
