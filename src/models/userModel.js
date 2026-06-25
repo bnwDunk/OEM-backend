@@ -5,6 +5,9 @@ function mapUser(row) {
 
   return {
     id: row.id,
+    departmentId: row.department_id,
+    departmentCode: row.department_code,
+    departmentName: row.department_name,
     name: row.name,
     email: row.email,
     passwordHash: row.password_hash,
@@ -15,9 +18,19 @@ function mapUser(row) {
 
 async function findUserByEmail(email) {
   const [rows] = await pool.execute(
-    `SELECT id, name, email, password_hash, role, is_active
+    `SELECT
+       users.id,
+       users.department_id,
+       departments.code AS department_code,
+       departments.name AS department_name,
+       users.name,
+       users.email,
+       users.password_hash,
+       users.role,
+       users.is_active
      FROM users
-     WHERE email = ?
+     LEFT JOIN departments ON departments.id = users.department_id
+     WHERE users.email = ?
      LIMIT 1`,
     [email],
   )
@@ -27,9 +40,19 @@ async function findUserByEmail(email) {
 
 async function findUserById(id) {
   const [rows] = await pool.execute(
-    `SELECT id, name, email, password_hash, role, is_active
+    `SELECT
+       users.id,
+       users.department_id,
+       departments.code AS department_code,
+       departments.name AS department_name,
+       users.name,
+       users.email,
+       users.password_hash,
+       users.role,
+       users.is_active
      FROM users
-     WHERE id = ?
+     LEFT JOIN departments ON departments.id = users.department_id
+     WHERE users.id = ?
      LIMIT 1`,
     [id],
   )
@@ -43,6 +66,13 @@ function toPublicUser(user) {
     name: user.name,
     email: user.email,
     role: user.role,
+    department: user.departmentId
+      ? {
+          id: user.departmentId,
+          code: user.departmentCode,
+          name: user.departmentName,
+        }
+      : null,
   }
 }
 

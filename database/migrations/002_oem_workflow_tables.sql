@@ -1,77 +1,40 @@
-CREATE DATABASE IF NOT EXISTS oem_app
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
-
 USE oem_app;
 
-CREATE TABLE IF NOT EXISTS departments (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  code VARCHAR(50) NOT NULL,
-  name VARCHAR(120) NOT NULL,
-  description VARCHAR(255) NULL DEFAULT NULL,
-  is_active TINYINT(1) NOT NULL DEFAULT 1,
-  sort_order INT UNSIGNED NOT NULL DEFAULT 0,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  UNIQUE KEY departments_code_unique (code),
-  UNIQUE KEY departments_name_unique (name)
+SET @department_sort_order_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'departments'
+    AND COLUMN_NAME = 'sort_order'
 );
 
-CREATE TABLE IF NOT EXISTS users (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  department_id BIGINT UNSIGNED NULL DEFAULT NULL,
-  name VARCHAR(120) NOT NULL,
-  email VARCHAR(190) NOT NULL,
-  password_hash VARCHAR(255) NOT NULL,
-  role VARCHAR(50) NOT NULL DEFAULT 'user',
-  is_active TINYINT(1) NOT NULL DEFAULT 1,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  UNIQUE KEY users_email_unique (email),
-  KEY users_department_id_index (department_id),
-  KEY users_role_index (role),
-  KEY users_is_active_index (is_active),
-  CONSTRAINT users_department_id_foreign
-    FOREIGN KEY (department_id) REFERENCES departments (id)
-    ON DELETE SET NULL
+SET @add_department_sort_order = IF(
+  @department_sort_order_exists = 0,
+  'ALTER TABLE departments ADD COLUMN sort_order INT UNSIGNED NOT NULL DEFAULT 0 AFTER is_active',
+  'SELECT 1'
 );
 
-CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  user_id BIGINT UNSIGNED NOT NULL,
-  token_hash CHAR(64) NOT NULL,
-  revoked_at DATETIME NULL DEFAULT NULL,
-  expires_at DATETIME NOT NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  UNIQUE KEY oauth_refresh_tokens_token_hash_unique (token_hash),
-  KEY oauth_refresh_tokens_user_id_index (user_id),
-  CONSTRAINT oauth_refresh_tokens_user_id_foreign
-    FOREIGN KEY (user_id) REFERENCES users (id)
-    ON DELETE CASCADE
-);
+PREPARE add_department_sort_order_stmt FROM @add_department_sort_order;
+EXECUTE add_department_sort_order_stmt;
+DEALLOCATE PREPARE add_department_sort_order_stmt;
 
-CREATE TABLE IF NOT EXISTS admin_audit_logs (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  actor_user_id BIGINT UNSIGNED NULL DEFAULT NULL,
-  action VARCHAR(80) NOT NULL,
-  entity_type ENUM('user', 'department', 'role', 'system') NOT NULL,
-  entity_id BIGINT UNSIGNED NULL DEFAULT NULL,
-  before_data JSON NULL DEFAULT NULL,
-  after_data JSON NULL DEFAULT NULL,
-  ip_address VARCHAR(45) NULL DEFAULT NULL,
-  user_agent VARCHAR(255) NULL DEFAULT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  KEY admin_audit_logs_actor_user_id_index (actor_user_id),
-  KEY admin_audit_logs_entity_index (entity_type, entity_id),
-  KEY admin_audit_logs_created_at_index (created_at),
-  CONSTRAINT admin_audit_logs_actor_user_id_foreign
-    FOREIGN KEY (actor_user_id) REFERENCES users (id)
-    ON DELETE SET NULL
-);
+INSERT INTO departments (code, name, sort_order)
+VALUES
+  ('SALES', 'Sales', 10),
+  ('MARKETING', 'Marketing', 20),
+  ('RD', 'R&D', 30),
+  ('CEO', 'CEO', 40),
+  ('PURCHASE', 'Purchase', 50),
+  ('PRODUCTION_PLAN', 'Production plan', 60),
+  ('ACCOUNTING', 'Accounting', 70),
+  ('QA', 'QA', 80),
+  ('QC', 'QC', 90),
+  ('WAREHOUSE', 'Warehouse', 100),
+  ('ADMIN', 'Admin', 110),
+  ('PRODUCTION', 'Production', 120)
+ON DUPLICATE KEY UPDATE
+  name = VALUES(name),
+  sort_order = VALUES(sort_order);
 
 CREATE TABLE IF NOT EXISTS customer_tags (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -120,20 +83,14 @@ CREATE TABLE IF NOT EXISTS customer_tag_assignments (
 
 CREATE TABLE IF NOT EXISTS workflow_templates (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  parent_template_id BIGINT UNSIGNED NULL DEFAULT NULL,
   code VARCHAR(50) NOT NULL,
   name VARCHAR(120) NOT NULL,
   version INT UNSIGNED NOT NULL DEFAULT 1,
-  status ENUM('active', 'draft', 'inactive') NOT NULL DEFAULT 'active',
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY workflow_templates_code_version_unique (code, version),
-  KEY workflow_templates_parent_template_id_index (parent_template_id),
-  CONSTRAINT workflow_templates_parent_template_id_foreign
-    FOREIGN KEY (parent_template_id) REFERENCES workflow_templates (id)
-    ON DELETE SET NULL
+  UNIQUE KEY workflow_templates_code_version_unique (code, version)
 );
 
 CREATE TABLE IF NOT EXISTS workflow_stages (
@@ -399,24 +356,6 @@ CREATE TABLE IF NOT EXISTS workflow_activity_logs (
     ON DELETE SET NULL
 );
 
-INSERT INTO departments (code, name, sort_order)
-VALUES
-  ('SALES', 'Sales', 10),
-  ('MARKETING', 'Marketing', 20),
-  ('RD', 'R&D', 30),
-  ('CEO', 'CEO', 40),
-  ('PURCHASE', 'Purchase', 50),
-  ('PRODUCTION_PLAN', 'Production plan', 60),
-  ('ACCOUNTING', 'Accounting', 70),
-  ('QA', 'QA', 80),
-  ('QC', 'QC', 90),
-  ('WAREHOUSE', 'Warehouse', 100),
-  ('ADMIN', 'Admin', 110),
-  ('PRODUCTION', 'Production', 120)
-ON DUPLICATE KEY UPDATE
-  name = VALUES(name),
-  sort_order = VALUES(sort_order);
-
 INSERT INTO customer_tags (name)
 VALUES
   ('น้ำเชื่อมใส'),
@@ -429,29 +368,3 @@ ON DUPLICATE KEY UPDATE name = VALUES(name);
 INSERT INTO workflow_templates (code, name, version)
 VALUES ('OEM_FLOW', 'OEM Flow', 1)
 ON DUPLICATE KEY UPDATE name = VALUES(name);
-
--- Demo user:
--- email: admin@oem.local
--- password: password123
-INSERT INTO users (department_id, name, email, password_hash, role)
-VALUES (
-  (SELECT id FROM departments WHERE code = 'ADMIN' LIMIT 1),
-  'OEM Admin',
-  'admin@oem.local',
-  '$2b$10$dEQ6nqoz2rTQhwYKTEFPO.u5HxxXe2cAqc4/fE508eSPCIXd9PxyC',
-  'admin'
-)
-ON DUPLICATE KEY UPDATE email = email;
-
--- Demo standard user:
--- email: user@oem.local
--- password: password123
-INSERT INTO users (department_id, name, email, password_hash, role)
-VALUES (
-  (SELECT id FROM departments WHERE code = 'SALES' LIMIT 1),
-  'OEM User',
-  'user@oem.local',
-  '$2b$10$dEQ6nqoz2rTQhwYKTEFPO.u5HxxXe2cAqc4/fE508eSPCIXd9PxyC',
-  'user'
-)
-ON DUPLICATE KEY UPDATE email = email;
