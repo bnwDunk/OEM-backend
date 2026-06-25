@@ -5,7 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "sync:workflow": "node database/sync_oem_flow_template.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
