@@ -53,6 +53,20 @@ CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
     ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS user_departments (
+  user_id BIGINT UNSIGNED NOT NULL,
+  department_id BIGINT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, department_id),
+  KEY user_departments_department_id_index (department_id),
+  CONSTRAINT user_departments_user_id_foreign
+    FOREIGN KEY (user_id) REFERENCES users (id)
+    ON DELETE CASCADE,
+  CONSTRAINT user_departments_department_id_foreign
+    FOREIGN KEY (department_id) REFERENCES departments (id)
+    ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS admin_audit_logs (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   actor_user_id BIGINT UNSIGNED NULL DEFAULT NULL,
@@ -443,6 +457,12 @@ VALUES (
 )
 ON DUPLICATE KEY UPDATE email = email;
 
+INSERT IGNORE INTO user_departments (user_id, department_id)
+VALUES (
+  (SELECT id FROM users WHERE email = 'admin@oem.local' LIMIT 1),
+  (SELECT id FROM departments WHERE code = 'ADMIN' LIMIT 1)
+);
+
 -- Demo standard user:
 -- email: user@oem.local
 -- password: password123
@@ -455,3 +475,9 @@ VALUES (
   'user'
 )
 ON DUPLICATE KEY UPDATE email = email;
+
+INSERT IGNORE INTO user_departments (user_id, department_id)
+VALUES (
+  (SELECT id FROM users WHERE email = 'user@oem.local' LIMIT 1),
+  (SELECT id FROM departments WHERE code = 'SALES' LIMIT 1)
+);

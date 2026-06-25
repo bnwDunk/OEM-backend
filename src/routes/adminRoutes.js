@@ -5,6 +5,7 @@ const {
   createFlow,
   createProjectWithFlow,
   createUser,
+  deleteUser,
   deleteCustomer,
   deleteFlow,
   getFlowStructure,
@@ -28,6 +29,7 @@ router.use(authenticate, requireAdmin)
 router.get('/users', listUsers)
 router.post('/users', createUser)
 router.patch('/users/:id', updateUser)
+router.delete('/users/:id', deleteUser)
 
 router.get('/departments', listDepartments)
 router.post('/departments', createDepartment)
