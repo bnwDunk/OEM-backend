@@ -38,7 +38,7 @@ function mapUser(row) {
   }
 }
 
-async function findUserByEmail(email) {
+async function findUserByIdentifier(identifier) {
   const [rows] = await pool.execute(
     `SELECT
        users.id,
@@ -65,12 +65,18 @@ async function findUserByEmail(email) {
        INNER JOIN departments ON departments.id = user_departments.department_id
        GROUP BY user_departments.user_id
      ) AS user_department_groups ON user_department_groups.user_id = users.id
-     WHERE users.email = ?
+     WHERE LOWER(users.email) = LOWER(?)
+        OR LOWER(users.name) = LOWER(?)
+        OR LOWER(SUBSTRING_INDEX(users.email, '@', 1)) = LOWER(?)
      LIMIT 1`,
-    [email],
+    [identifier, identifier, identifier],
   )
 
   return mapUser(rows[0])
+}
+
+async function findUserByEmail(email) {
+  return findUserByIdentifier(email)
 }
 
 async function findUserById(id) {
@@ -127,6 +133,7 @@ function toPublicUser(user) {
 
 module.exports = {
   findUserByEmail,
+  findUserByIdentifier,
   findUserById,
   toPublicUser,
 }

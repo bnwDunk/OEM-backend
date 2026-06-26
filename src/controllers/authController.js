@@ -7,7 +7,7 @@ const {
   revokeRefreshToken,
   revokeUserRefreshTokens,
 } = require('../models/refreshTokenModel')
-const { findUserByEmail, findUserById, toPublicUser } = require('../models/userModel')
+const { findUserByIdentifier, findUserById, toPublicUser } = require('../models/userModel')
 const {
   getJwtExpiry,
   hashToken,
@@ -27,22 +27,23 @@ function buildTokenResponse(user, refreshToken) {
 
 async function login(req, res, next) {
   try {
-    const { email, password } = req.body
+    const { password } = req.body
+    const identifier = String(req.body.identifier || req.body.username || req.body.email || '').trim()
 
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password are required.' })
+    if (!identifier || !password) {
+      return res.status(400).json({ message: 'Username or email and password are required.' })
     }
 
-    const user = await findUserByEmail(email)
+    const user = await findUserByIdentifier(identifier)
 
     if (!user || !user.isActive) {
-      return res.status(401).json({ message: 'Invalid email or password.' })
+      return res.status(401).json({ message: 'Invalid username/email or password.' })
     }
 
     const passwordMatched = await bcrypt.compare(password, user.passwordHash)
 
     if (!passwordMatched) {
-      return res.status(401).json({ message: 'Invalid email or password.' })
+      return res.status(401).json({ message: 'Invalid username/email or password.' })
     }
 
     const refreshToken = signRefreshToken(user)
@@ -128,7 +129,7 @@ function oauthToken(req, res, next) {
   const { grant_type: grantType } = req.body
 
   if (grantType === 'password') {
-    req.body.email = req.body.email || req.body.username
+    req.body.identifier = req.body.identifier || req.body.username || req.body.email
     return login(req, res, next)
   }
 
