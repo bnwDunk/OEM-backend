@@ -455,7 +455,10 @@ VALUES (
   '$2b$10$dEQ6nqoz2rTQhwYKTEFPO.u5HxxXe2cAqc4/fE508eSPCIXd9PxyC',
   'admin'
 )
-ON DUPLICATE KEY UPDATE email = email;
+ON DUPLICATE KEY UPDATE
+  role = 'admin',
+  department_id = COALESCE(department_id, (SELECT id FROM departments WHERE code = 'ADMIN' LIMIT 1)),
+  is_active = 1;
 
 INSERT IGNORE INTO user_departments (user_id, department_id)
 VALUES (

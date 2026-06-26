@@ -2,13 +2,20 @@ const bcrypt = require('bcryptjs')
 const pool = require('../config/db')
 
 function mapUser(row) {
-  const departments = row.departments_json ? JSON.parse(row.departments_json).filter(Boolean) : []
+  const departmentIds = row.department_ids ? String(row.department_ids).split(',') : []
+  const departmentNames = row.department_names ? String(row.department_names).split('\n') : []
+  const departments = departmentIds
+    .map((id, index) => ({
+      id: Number(id),
+      name: departmentNames[index],
+    }))
+    .filter((department) => department.id && department.name)
 
   return {
     id: row.id,
     name: row.name,
     email: row.email,
-    role: row.role,
+    role: String(row.role || 'user').trim().toLowerCase(),
     status: row.is_active ? 'active' : 'inactive',
     lastLogin: row.last_login_at || 'Never',
     department: departments[0]?.name || row.department_name,
@@ -144,13 +151,15 @@ async function listUsers(req, res, next) {
          users.department_id,
          NULL AS last_login_at,
          departments.name AS department_name,
-         user_department_groups.departments_json
+         user_department_groups.department_ids,
+         user_department_groups.department_names
        FROM users
        LEFT JOIN departments ON departments.id = users.department_id
        LEFT JOIN (
          SELECT
            user_departments.user_id,
-           JSON_ARRAYAGG(JSON_OBJECT('id', departments.id, 'name', departments.name)) AS departments_json
+           GROUP_CONCAT(departments.id ORDER BY departments.name ASC SEPARATOR ',') AS department_ids,
+           GROUP_CONCAT(departments.name ORDER BY departments.name ASC SEPARATOR '\n') AS department_names
          FROM user_departments
          INNER JOIN departments ON departments.id = user_departments.department_id
          GROUP BY user_departments.user_id
@@ -182,6 +191,7 @@ async function createUser(req, res, next) {
       return res.status(400).json({ message: 'name and email are required.' })
     }
 
+    const normalizedRole = String(role || 'user').trim().toLowerCase()
     const passwordHash = await bcrypt.hash(password, 10)
     const selectedDepartmentIds = Array.isArray(departmentIds)
       ? departmentIds.map((item) => Number(item)).filter(Boolean)
@@ -193,7 +203,7 @@ async function createUser(req, res, next) {
     const [result] = await connection.execute(
       `INSERT INTO users (department_id, name, email, password_hash, role, is_active)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [primaryDepartmentId, name, email, passwordHash, role, status === 'active' ? 1 : 0],
+      [primaryDepartmentId, name, email, passwordHash, normalizedRole, status === 'active' ? 1 : 0],
     )
 
     for (const assignedDepartmentId of selectedDepartmentIds) {
@@ -209,7 +219,7 @@ async function createUser(req, res, next) {
       action: 'create_user',
       entityType: 'user',
       entityId: result.insertId,
-      afterData: { departmentIds: selectedDepartmentIds, email, name, role, status },
+      afterData: { departmentIds: selectedDepartmentIds, email, name, role: normalizedRole, status },
     })
 
     return res.status(201).json({ id: result.insertId })
@@ -231,6 +241,7 @@ async function updateUser(req, res, next) {
     const [beforeRows] = await connection.execute('SELECT * FROM users WHERE id = ? LIMIT 1', [id])
     if (!beforeRows[0]) return res.status(404).json({ message: 'User not found.' })
 
+    const normalizedRole = role === undefined || role === null ? null : String(role).trim().toLowerCase()
     const selectedDepartmentIds = Array.isArray(departmentIds)
       ? departmentIds.map((item) => Number(item)).filter(Boolean)
       : departmentId ? [Number(departmentId)] : null
@@ -246,9 +257,9 @@ async function updateUser(req, res, next) {
            is_active = COALESCE(?, is_active)
        WHERE id = ?`,
       [
-        departmentId ?? null,
+        primaryDepartmentId,
         name ?? null,
-        role ?? null,
+        normalizedRole,
         status ? (status === 'active' ? 1 : 0) : null,
         id,
       ],
@@ -271,7 +282,7 @@ async function updateUser(req, res, next) {
       entityType: 'user',
       entityId: Number(id),
       beforeData: beforeRows[0],
-      afterData: { departmentIds: selectedDepartmentIds, departmentId, name, role, status },
+      afterData: { departmentIds: selectedDepartmentIds, departmentId, name, role: normalizedRole, status },
     })
 
     return res.status(204).send()

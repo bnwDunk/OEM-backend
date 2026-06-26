@@ -9,6 +9,7 @@ function signAccessToken(user) {
       email: user.email,
       role: user.role,
       department_id: user.departmentId,
+      department_ids: user.departmentIds || [],
       token_type: 'access_token',
     },
     env.jwt.accessSecret,

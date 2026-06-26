@@ -58,6 +58,22 @@ async function ensureProductionSchema() {
        WHERE department_id IS NOT NULL`,
     )
 
+    await connection.execute(
+      `UPDATE users
+       SET role = 'admin',
+           department_id = COALESCE(department_id, (SELECT id FROM departments WHERE code = 'ADMIN' LIMIT 1)),
+           is_active = 1
+       WHERE email = 'admin@oem.local'`,
+    )
+
+    await connection.execute(
+      `INSERT IGNORE INTO user_departments (user_id, department_id)
+       SELECT users.id, users.department_id
+       FROM users
+       WHERE users.email = 'admin@oem.local'
+         AND users.department_id IS NOT NULL`,
+    )
+
     if (await addColumnIfMissing(connection, 'customer_tags', 'color', 'color VARCHAR(30) NULL DEFAULT NULL AFTER name')) {
       changes.push('customer_tags.color')
     }
