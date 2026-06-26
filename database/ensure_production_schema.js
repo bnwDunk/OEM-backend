@@ -35,6 +35,45 @@ async function ensureProductionSchema() {
   try {
     const changes = []
 
+    await connection.query(
+      `CREATE TABLE IF NOT EXISTS user_departments (
+        user_id BIGINT UNSIGNED NOT NULL,
+        department_id BIGINT UNSIGNED NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, department_id),
+        KEY user_departments_department_id_index (department_id),
+        CONSTRAINT user_departments_user_id_foreign
+          FOREIGN KEY (user_id) REFERENCES users (id)
+          ON DELETE CASCADE,
+        CONSTRAINT user_departments_department_id_foreign
+          FOREIGN KEY (department_id) REFERENCES departments (id)
+          ON DELETE CASCADE
+      )`,
+    )
+
+    await connection.execute(
+      `INSERT IGNORE INTO user_departments (user_id, department_id)
+       SELECT id, department_id
+       FROM users
+       WHERE department_id IS NOT NULL`,
+    )
+
+    await connection.execute(
+      `UPDATE users
+       SET role = 'admin',
+           department_id = COALESCE(department_id, (SELECT id FROM departments WHERE code = 'ADMIN' LIMIT 1)),
+           is_active = 1
+       WHERE email = 'admin@oem.local'`,
+    )
+
+    await connection.execute(
+      `INSERT IGNORE INTO user_departments (user_id, department_id)
+       SELECT users.id, users.department_id
+       FROM users
+       WHERE users.email = 'admin@oem.local'
+         AND users.department_id IS NOT NULL`,
+    )
+
     if (await addColumnIfMissing(connection, 'customer_tags', 'color', 'color VARCHAR(30) NULL DEFAULT NULL AFTER name')) {
       changes.push('customer_tags.color')
     }

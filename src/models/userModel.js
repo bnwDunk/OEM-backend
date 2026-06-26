@@ -3,15 +3,37 @@ const pool = require('../config/db')
 function mapUser(row) {
   if (!row) return null
 
+  const departmentIds = row.department_ids ? String(row.department_ids).split(',') : []
+  const departmentCodes = row.department_codes ? String(row.department_codes).split('\n') : []
+  const departmentNames = row.department_names ? String(row.department_names).split('\n') : []
+  const assignedDepartments = departmentIds
+    .map((id, index) => ({
+      id: Number(id),
+      code: departmentCodes[index],
+      name: departmentNames[index],
+    }))
+    .filter((department) => department.id && department.name)
+  const primaryDepartment = assignedDepartments[0] || (
+    row.department_id
+      ? {
+          id: row.department_id,
+          code: row.department_code,
+          name: row.department_name,
+        }
+      : null
+  )
+
   return {
     id: row.id,
-    departmentId: row.department_id,
-    departmentCode: row.department_code,
-    departmentName: row.department_name,
+    departmentId: primaryDepartment?.id || null,
+    departmentCode: primaryDepartment?.code || null,
+    departmentName: primaryDepartment?.name || null,
+    departmentIds: assignedDepartments.map((department) => department.id),
+    departments: assignedDepartments,
     name: row.name,
     email: row.email,
     passwordHash: row.password_hash,
-    role: row.role,
+    role: String(row.role || 'user').trim().toLowerCase(),
     isActive: Boolean(row.is_active),
   }
 }
@@ -27,9 +49,22 @@ async function findUserByEmail(email) {
        users.email,
        users.password_hash,
        users.role,
-       users.is_active
+       users.is_active,
+       user_department_groups.department_ids,
+       user_department_groups.department_codes,
+       user_department_groups.department_names
      FROM users
      LEFT JOIN departments ON departments.id = users.department_id
+     LEFT JOIN (
+       SELECT
+         user_departments.user_id,
+         GROUP_CONCAT(departments.id ORDER BY departments.name ASC SEPARATOR ',') AS department_ids,
+         GROUP_CONCAT(departments.code ORDER BY departments.name ASC SEPARATOR '\n') AS department_codes,
+         GROUP_CONCAT(departments.name ORDER BY departments.name ASC SEPARATOR '\n') AS department_names
+       FROM user_departments
+       INNER JOIN departments ON departments.id = user_departments.department_id
+       GROUP BY user_departments.user_id
+     ) AS user_department_groups ON user_department_groups.user_id = users.id
      WHERE users.email = ?
      LIMIT 1`,
     [email],
@@ -49,9 +84,22 @@ async function findUserById(id) {
        users.email,
        users.password_hash,
        users.role,
-       users.is_active
+       users.is_active,
+       user_department_groups.department_ids,
+       user_department_groups.department_codes,
+       user_department_groups.department_names
      FROM users
      LEFT JOIN departments ON departments.id = users.department_id
+     LEFT JOIN (
+       SELECT
+         user_departments.user_id,
+         GROUP_CONCAT(departments.id ORDER BY departments.name ASC SEPARATOR ',') AS department_ids,
+         GROUP_CONCAT(departments.code ORDER BY departments.name ASC SEPARATOR '\n') AS department_codes,
+         GROUP_CONCAT(departments.name ORDER BY departments.name ASC SEPARATOR '\n') AS department_names
+       FROM user_departments
+       INNER JOIN departments ON departments.id = user_departments.department_id
+       GROUP BY user_departments.user_id
+     ) AS user_department_groups ON user_department_groups.user_id = users.id
      WHERE users.id = ?
      LIMIT 1`,
     [id],
@@ -65,7 +113,8 @@ function toPublicUser(user) {
     id: user.id,
     name: user.name,
     email: user.email,
-    role: user.role,
+    role: String(user.role || 'user').trim().toLowerCase(),
+    departments: user.departments || [],
     department: user.departmentId
       ? {
           id: user.departmentId,

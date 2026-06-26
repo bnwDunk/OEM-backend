@@ -2,15 +2,26 @@ const bcrypt = require('bcryptjs')
 const pool = require('../config/db')
 
 function mapUser(row) {
+  const departmentIds = row.department_ids ? String(row.department_ids).split(',') : []
+  const departmentNames = row.department_names ? String(row.department_names).split('\n') : []
+  const departments = departmentIds
+    .map((id, index) => ({
+      id: Number(id),
+      name: departmentNames[index],
+    }))
+    .filter((department) => department.id && department.name)
+
   return {
     id: row.id,
     name: row.name,
     email: row.email,
-    role: row.role,
+    role: String(row.role || 'user').trim().toLowerCase(),
     status: row.is_active ? 'active' : 'inactive',
     lastLogin: row.last_login_at || 'Never',
-    department: row.department_name,
-    departmentId: row.department_id,
+    department: departments[0]?.name || row.department_name,
+    departmentId: departments[0]?.id || row.department_id,
+    departments,
+    departmentIds: departments.map((department) => department.id),
   }
 }
 
@@ -139,9 +150,20 @@ async function listUsers(req, res, next) {
          users.is_active,
          users.department_id,
          NULL AS last_login_at,
-         departments.name AS department_name
+         departments.name AS department_name,
+         user_department_groups.department_ids,
+         user_department_groups.department_names
        FROM users
        LEFT JOIN departments ON departments.id = users.department_id
+       LEFT JOIN (
+         SELECT
+           user_departments.user_id,
+           GROUP_CONCAT(departments.id ORDER BY departments.name ASC SEPARATOR ',') AS department_ids,
+           GROUP_CONCAT(departments.name ORDER BY departments.name ASC SEPARATOR '\n') AS department_names
+         FROM user_departments
+         INNER JOIN departments ON departments.id = user_departments.department_id
+         GROUP BY user_departments.user_id
+       ) AS user_department_groups ON user_department_groups.user_id = users.id
        ORDER BY users.id ASC`,
     )
 
@@ -152,9 +174,12 @@ async function listUsers(req, res, next) {
 }
 
 async function createUser(req, res, next) {
+  const connection = await pool.getConnection()
+
   try {
     const {
       departmentId,
+      departmentIds,
       email,
       name,
       password = 'password123',
@@ -166,35 +191,65 @@ async function createUser(req, res, next) {
       return res.status(400).json({ message: 'name and email are required.' })
     }
 
+    const normalizedRole = String(role || 'user').trim().toLowerCase()
     const passwordHash = await bcrypt.hash(password, 10)
-    const [result] = await pool.execute(
+    const selectedDepartmentIds = Array.isArray(departmentIds)
+      ? departmentIds.map((item) => Number(item)).filter(Boolean)
+      : departmentId ? [Number(departmentId)] : []
+    const primaryDepartmentId = selectedDepartmentIds[0] || null
+
+    await connection.beginTransaction()
+
+    const [result] = await connection.execute(
       `INSERT INTO users (department_id, name, email, password_hash, role, is_active)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [departmentId || null, name, email, passwordHash, role, status === 'active' ? 1 : 0],
+      [primaryDepartmentId, name, email, passwordHash, normalizedRole, status === 'active' ? 1 : 0],
     )
+
+    for (const assignedDepartmentId of selectedDepartmentIds) {
+      await connection.execute(
+        'INSERT IGNORE INTO user_departments (user_id, department_id) VALUES (?, ?)',
+        [result.insertId, assignedDepartmentId],
+      )
+    }
+
+    await connection.commit()
 
     await logAdminAction(req, {
       action: 'create_user',
       entityType: 'user',
       entityId: result.insertId,
-      afterData: { departmentId, email, name, role, status },
+      afterData: { departmentIds: selectedDepartmentIds, email, name, role: normalizedRole, status },
     })
 
     return res.status(201).json({ id: result.insertId })
   } catch (error) {
+    await connection.rollback()
     return next(error)
+  } finally {
+    connection.release()
   }
 }
 
 async function updateUser(req, res, next) {
+  const connection = await pool.getConnection()
+
   try {
     const { id } = req.params
-    const { departmentId, name, role, status } = req.body
+    const { departmentId, departmentIds, name, role, status } = req.body
 
-    const [beforeRows] = await pool.execute('SELECT * FROM users WHERE id = ? LIMIT 1', [id])
+    const [beforeRows] = await connection.execute('SELECT * FROM users WHERE id = ? LIMIT 1', [id])
     if (!beforeRows[0]) return res.status(404).json({ message: 'User not found.' })
 
-    await pool.execute(
+    const normalizedRole = role === undefined || role === null ? null : String(role).trim().toLowerCase()
+    const selectedDepartmentIds = Array.isArray(departmentIds)
+      ? departmentIds.map((item) => Number(item)).filter(Boolean)
+      : departmentId ? [Number(departmentId)] : null
+    const primaryDepartmentId = selectedDepartmentIds ? selectedDepartmentIds[0] || null : departmentId ?? null
+
+    await connection.beginTransaction()
+
+    await connection.execute(
       `UPDATE users
        SET department_id = COALESCE(?, department_id),
            name = COALESCE(?, name),
@@ -202,20 +257,60 @@ async function updateUser(req, res, next) {
            is_active = COALESCE(?, is_active)
        WHERE id = ?`,
       [
-        departmentId ?? null,
+        primaryDepartmentId,
         name ?? null,
-        role ?? null,
+        normalizedRole,
         status ? (status === 'active' ? 1 : 0) : null,
         id,
       ],
     )
+
+    if (selectedDepartmentIds) {
+      await connection.execute('DELETE FROM user_departments WHERE user_id = ?', [id])
+      for (const assignedDepartmentId of selectedDepartmentIds) {
+        await connection.execute(
+          'INSERT IGNORE INTO user_departments (user_id, department_id) VALUES (?, ?)',
+          [id, assignedDepartmentId],
+        )
+      }
+    }
+
+    await connection.commit()
 
     await logAdminAction(req, {
       action: 'update_user',
       entityType: 'user',
       entityId: Number(id),
       beforeData: beforeRows[0],
-      afterData: { departmentId, name, role, status },
+      afterData: { departmentIds: selectedDepartmentIds, departmentId, name, role: normalizedRole, status },
+    })
+
+    return res.status(204).send()
+  } catch (error) {
+    await connection.rollback()
+    return next(error)
+  } finally {
+    connection.release()
+  }
+}
+
+async function deleteUser(req, res, next) {
+  try {
+    const { id } = req.params
+    if (Number(id) === req.user.id) {
+      return res.status(400).json({ message: 'You cannot delete your own account.' })
+    }
+
+    const [beforeRows] = await pool.execute('SELECT * FROM users WHERE id = ? LIMIT 1', [id])
+    if (!beforeRows[0]) return res.status(404).json({ message: 'User not found.' })
+
+    await pool.execute('DELETE FROM users WHERE id = ?', [id])
+
+    await logAdminAction(req, {
+      action: 'delete_user',
+      entityType: 'user',
+      entityId: Number(id),
+      beforeData: beforeRows[0],
     })
 
     return res.status(204).send()
@@ -232,10 +327,11 @@ async function listDepartments(req, res, next) {
          departments.code,
          departments.name,
          departments.is_active,
-         COUNT(users.id) AS member_count,
+         COUNT(DISTINCT user_departments.user_id) AS member_count,
          MAX(CASE WHEN users.role IN ('admin', 'manager') THEN users.name ELSE NULL END) AS manager_name
        FROM departments
-       LEFT JOIN users ON users.department_id = departments.id
+       LEFT JOIN user_departments ON user_departments.department_id = departments.id
+       LEFT JOIN users ON users.id = user_departments.user_id
        GROUP BY departments.id
        ORDER BY departments.sort_order ASC, departments.name ASC`,
     )
@@ -1102,6 +1198,7 @@ module.exports = {
   createFlow,
   createProjectWithFlow,
   createUser,
+  deleteUser,
   deleteCustomer,
   deleteFlow,
   getFlowStructure,
