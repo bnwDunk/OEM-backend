@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const { env } = require('../config/env')
+const pool = require('../config/db')
 const {
   createRefreshToken,
   findActiveRefreshToken,
@@ -125,6 +126,42 @@ function me(req, res) {
   return res.json({ user: toPublicUser(req.user) })
 }
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim())
+}
+
+async function updateMe(req, res, next) {
+  try {
+    const name = String(req.body.name || '').trim()
+    const email = String(req.body.email || '').trim().toLowerCase()
+
+    if (!name || !email) {
+      return res.status(400).json({ message: 'name and email are required.' })
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'A valid email is required for notifications.' })
+    }
+
+    await pool.execute(
+      `UPDATE users
+       SET name = ?, email = ?
+       WHERE id = ?`,
+      [name, email, req.user.id],
+    )
+
+    const user = await findUserById(req.user.id)
+
+    return res.json({ user: toPublicUser(user) })
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'This email is already used by another user.' })
+    }
+
+    return next(error)
+  }
+}
+
 function oauthToken(req, res, next) {
   const { grant_type: grantType } = req.body
 
@@ -149,4 +186,5 @@ module.exports = {
   me,
   oauthToken,
   refresh,
+  updateMe,
 }

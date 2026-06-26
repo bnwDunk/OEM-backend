@@ -1,4 +1,5 @@
 const pool = require('../config/db')
+const { sendPhaseAdvancedEmail } = require('../services/mailService')
 
 function formatMoney(value) {
   if (value === null || value === undefined) return ''
@@ -193,6 +194,64 @@ async function updateChecklist(connection, { branchStateId, checkedValues, markS
   }
 }
 
+async function getPhaseNotificationContext(connection, { customerId, customerWorkflowId, phaseId }) {
+  const [phaseRows] = await connection.execute(
+    `SELECT
+       workflow_phases.id,
+       workflow_phases.label,
+       workflow_phases.name,
+       workflow_phases.global_order,
+       workflow_stages.name AS stage_name
+     FROM workflow_phases
+     INNER JOIN workflow_stages
+       ON workflow_stages.id = workflow_phases.stage_id
+     INNER JOIN customer_workflows
+       ON customer_workflows.template_id = workflow_stages.template_id
+     WHERE customer_workflows.id = ?
+       AND workflow_phases.id = ?
+     LIMIT 1`,
+    [customerWorkflowId, phaseId],
+  )
+
+  if (!phaseRows[0]) return null
+
+  const [recipientRows] = await connection.execute(
+    `SELECT DISTINCT users.email
+     FROM workflow_phase_branches
+     INNER JOIN departments
+       ON departments.id = workflow_phase_branches.department_id
+      AND departments.is_active = 1
+     INNER JOIN users
+       ON users.is_active = 1
+      AND (
+        users.department_id = departments.id
+        OR EXISTS (
+          SELECT 1
+          FROM user_departments
+          WHERE user_departments.user_id = users.id
+            AND user_departments.department_id = departments.id
+        )
+      )
+     WHERE workflow_phase_branches.phase_id = ?
+     ORDER BY users.email ASC`,
+    [phaseId],
+  )
+
+  const [customerRows] = await connection.execute(
+    `SELECT id, name, slug
+     FROM customers
+     WHERE id = ?
+     LIMIT 1`,
+    [customerId],
+  )
+
+  return {
+    customer: customerRows[0] || null,
+    phase: phaseRows[0],
+    recipients: recipientRows.map((row) => row.email),
+  }
+}
+
 async function advanceWorkflowIfPhaseDone(connection, branchContext) {
   const [openBranchRows] = await connection.execute(
     `SELECT COUNT(*) AS open_count
@@ -202,7 +261,9 @@ async function advanceWorkflowIfPhaseDone(connection, branchContext) {
     [branchContext.customer_phase_state_id],
   )
 
-  if (Number(openBranchRows[0].open_count) > 0) return false
+  if (Number(openBranchRows[0].open_count) > 0) {
+    return { advanced: false, completed: false, notification: null }
+  }
 
   await connection.execute(
     `UPDATE customer_phase_states
@@ -232,7 +293,7 @@ async function advanceWorkflowIfPhaseDone(connection, branchContext) {
        WHERE id = ?`,
       [branchContext.customer_workflow_id],
     )
-    return true
+    return { advanced: true, completed: true, notification: null }
   }
 
   await connection.execute(
@@ -260,7 +321,46 @@ async function advanceWorkflowIfPhaseDone(connection, branchContext) {
     [branchContext.customer_workflow_id, nextPhaseRows[0].id],
   )
 
-  return true
+  const notification = await getPhaseNotificationContext(connection, {
+    customerId: branchContext.customer_id,
+    customerWorkflowId: branchContext.customer_workflow_id,
+    phaseId: nextPhaseRows[0].id,
+  })
+
+  return { advanced: true, completed: false, notification }
+}
+
+async function recordEmailNotificationResult({ actorUserId, error, notification, result }) {
+  if (!notification?.customer || !notification?.phase) return
+
+  const to = result?.to || notification.recipients || []
+  const skipped = Boolean(result?.skipped)
+  const action = error ? 'email_notification_failed' : skipped ? 'email_notification_skipped' : 'email_notification_sent'
+  const message = error
+    ? `Email notification failed for phase ${notification.phase.label}: ${notification.phase.name}`
+    : skipped
+      ? `Email notification skipped for phase ${notification.phase.label}: ${notification.phase.name}`
+      : `Email notification sent for phase ${notification.phase.label}: ${notification.phase.name}`
+
+  try {
+    await pool.execute(
+      `INSERT INTO workflow_activity_logs (customer_id, phase_id, actor_user_id, action, message, metadata)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        notification.customer.id,
+        notification.phase.id,
+        actorUserId,
+        action,
+        message,
+        JSON.stringify({
+          error: error ? error.message : null,
+          recipients: to,
+        }),
+      ],
+    )
+  } catch (logError) {
+    console.warn('Failed to record email notification result:', logError.message)
+  }
 }
 
 async function listOverview(req, res, next) {
@@ -579,7 +679,7 @@ async function completeBranch(req, res, next) {
       [req.user.id, branchContext.customer_branch_state_id],
     )
 
-    const advanced = await advanceWorkflowIfPhaseDone(connection, branchContext)
+    const advanceResult = await advanceWorkflowIfPhaseDone(connection, branchContext)
     const message = `ฝ่าย ${branchContext.department_name} ทำงานเสร็จแล้ว - ${branchContext.phase_name}`
 
     await connection.execute(
@@ -596,7 +696,32 @@ async function completeBranch(req, res, next) {
 
     await connection.commit()
 
-    return res.json({ advanced, completed: true })
+    if (advanceResult.notification?.customer && advanceResult.notification?.phase) {
+      try {
+        const result = await sendPhaseAdvancedEmail({
+          customerName: advanceResult.notification.customer.name,
+          nextPhase: advanceResult.notification.phase,
+          recipients: advanceResult.notification.recipients,
+        })
+        await recordEmailNotificationResult({
+          actorUserId: req.user.id,
+          notification: advanceResult.notification,
+          result,
+        })
+      } catch (emailError) {
+        await recordEmailNotificationResult({
+          actorUserId: req.user.id,
+          error: emailError,
+          notification: advanceResult.notification,
+        })
+      }
+    }
+
+    return res.json({
+      advanced: advanceResult.advanced,
+      completed: true,
+      emailNotificationQueued: Boolean(advanceResult.notification),
+    })
   } catch (error) {
     await connection.rollback()
     return next(error)
