@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs')
 const pool = require('../config/db')
+const { sendPhaseAdvancedEmail } = require('../services/mailService')
 
 function mapUser(row) {
   const departmentIds = row.department_ids ? String(row.department_ids).split(',') : []
@@ -83,6 +84,10 @@ function makeSlug(name) {
     .slice(0, 80) || `project-${Date.now()}`
 }
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim())
+}
+
 async function makeUniqueCustomerSlug(connection, name) {
   const baseSlug = makeSlug(name)
   let slug = baseSlug
@@ -139,6 +144,116 @@ async function logAdminAction(req, { action, entityType, entityId, beforeData, a
   )
 }
 
+async function getPhaseNotificationContext(connection, { customerId, phaseId }) {
+  const [customerRows] = await connection.execute(
+    `SELECT id, name, slug
+     FROM customers
+     WHERE id = ?
+     LIMIT 1`,
+    [customerId],
+  )
+
+  const [phaseRows] = await connection.execute(
+    `SELECT
+       workflow_phases.id,
+       workflow_phases.label,
+       workflow_phases.name,
+       workflow_stages.name AS stage_name
+     FROM workflow_phases
+     INNER JOIN workflow_stages
+       ON workflow_stages.id = workflow_phases.stage_id
+     WHERE workflow_phases.id = ?
+     LIMIT 1`,
+    [phaseId],
+  )
+
+  const [recipientRows] = await connection.execute(
+    `SELECT DISTINCT users.email
+     FROM workflow_phase_branches
+     INNER JOIN departments
+       ON departments.id = workflow_phase_branches.department_id
+      AND departments.is_active = 1
+     INNER JOIN users
+       ON users.is_active = 1
+      AND (
+        users.department_id = departments.id
+        OR EXISTS (
+          SELECT 1
+          FROM user_departments
+          WHERE user_departments.user_id = users.id
+            AND user_departments.department_id = departments.id
+        )
+      )
+     WHERE workflow_phase_branches.phase_id = ?
+     ORDER BY users.email ASC`,
+    [phaseId],
+  )
+
+  if (!customerRows[0] || !phaseRows[0]) return null
+
+  return {
+    customer: customerRows[0],
+    phase: phaseRows[0],
+    recipients: recipientRows.map((row) => row.email),
+  }
+}
+
+async function recordEmailNotificationResult({ actorUserId, error, notification, result }) {
+  if (!notification?.customer || !notification?.phase) return
+
+  const to = result?.to || notification.recipients || []
+  const skipped = Boolean(result?.skipped)
+  const action = error ? 'email_notification_failed' : skipped ? 'email_notification_skipped' : 'email_notification_sent'
+  const message = error
+    ? `Email notification failed for phase ${notification.phase.label}: ${notification.phase.name}`
+    : skipped
+      ? `Email notification skipped for phase ${notification.phase.label}: ${notification.phase.name}`
+      : `Email notification sent for phase ${notification.phase.label}: ${notification.phase.name}`
+
+  try {
+    await pool.execute(
+      `INSERT INTO workflow_activity_logs (customer_id, phase_id, actor_user_id, action, message, metadata)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        notification.customer.id,
+        notification.phase.id,
+        actorUserId,
+        action,
+        message,
+        JSON.stringify({
+          error: error ? error.message : null,
+          recipients: to,
+        }),
+      ],
+    )
+  } catch (logError) {
+    console.warn('Failed to record email notification result:', logError.message)
+  }
+}
+
+async function sendCustomerCreatedNotification({ actorUserId, notification }) {
+  if (!notification?.customer || !notification?.phase) return
+
+  try {
+    const result = await sendPhaseAdvancedEmail({
+      customerName: notification.customer.name,
+      nextPhase: notification.phase,
+      recipients: notification.recipients,
+    })
+    await recordEmailNotificationResult({
+      actorUserId,
+      notification,
+      result,
+    })
+  } catch (error) {
+    await recordEmailNotificationResult({
+      actorUserId,
+      error,
+      notification,
+    })
+  }
+}
+
 async function listUsers(req, res, next) {
   try {
     const [rows] = await pool.execute(
@@ -191,7 +306,12 @@ async function createUser(req, res, next) {
       return res.status(400).json({ message: 'name and email are required.' })
     }
 
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: 'A valid email is required for notifications.' })
+    }
+
     const normalizedRole = String(role || 'user').trim().toLowerCase()
+    const normalizedEmail = String(email).trim().toLowerCase()
     const passwordHash = await bcrypt.hash(password, 10)
     const selectedDepartmentIds = Array.isArray(departmentIds)
       ? departmentIds.map((item) => Number(item)).filter(Boolean)
@@ -203,7 +323,7 @@ async function createUser(req, res, next) {
     const [result] = await connection.execute(
       `INSERT INTO users (department_id, name, email, password_hash, role, is_active)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [primaryDepartmentId, name, email, passwordHash, normalizedRole, status === 'active' ? 1 : 0],
+      [primaryDepartmentId, name, normalizedEmail, passwordHash, normalizedRole, status === 'active' ? 1 : 0],
     )
 
     for (const assignedDepartmentId of selectedDepartmentIds) {
@@ -219,12 +339,15 @@ async function createUser(req, res, next) {
       action: 'create_user',
       entityType: 'user',
       entityId: result.insertId,
-      afterData: { departmentIds: selectedDepartmentIds, email, name, role: normalizedRole, status },
+      afterData: { departmentIds: selectedDepartmentIds, email: normalizedEmail, name, role: normalizedRole, status },
     })
 
     return res.status(201).json({ id: result.insertId })
   } catch (error) {
     await connection.rollback()
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'This email is already used by another user.' })
+    }
     return next(error)
   } finally {
     connection.release()
@@ -236,12 +359,16 @@ async function updateUser(req, res, next) {
 
   try {
     const { id } = req.params
-    const { departmentId, departmentIds, name, role, status } = req.body
+    const { departmentId, departmentIds, email, name, role, status } = req.body
 
     const [beforeRows] = await connection.execute('SELECT * FROM users WHERE id = ? LIMIT 1', [id])
     if (!beforeRows[0]) return res.status(404).json({ message: 'User not found.' })
 
     const normalizedRole = role === undefined || role === null ? null : String(role).trim().toLowerCase()
+    const normalizedEmail = email === undefined || email === null ? null : String(email).trim().toLowerCase()
+    if (normalizedEmail !== null && !isValidEmail(normalizedEmail)) {
+      return res.status(400).json({ message: 'A valid email is required for notifications.' })
+    }
     const selectedDepartmentIds = Array.isArray(departmentIds)
       ? departmentIds.map((item) => Number(item)).filter(Boolean)
       : departmentId ? [Number(departmentId)] : null
@@ -252,12 +379,14 @@ async function updateUser(req, res, next) {
     await connection.execute(
       `UPDATE users
        SET department_id = COALESCE(?, department_id),
+           email = COALESCE(?, email),
            name = COALESCE(?, name),
            role = COALESCE(?, role),
            is_active = COALESCE(?, is_active)
        WHERE id = ?`,
       [
         primaryDepartmentId,
+        normalizedEmail,
         name ?? null,
         normalizedRole,
         status ? (status === 'active' ? 1 : 0) : null,
@@ -282,12 +411,15 @@ async function updateUser(req, res, next) {
       entityType: 'user',
       entityId: Number(id),
       beforeData: beforeRows[0],
-      afterData: { departmentIds: selectedDepartmentIds, departmentId, name, role: normalizedRole, status },
+      afterData: { departmentIds: selectedDepartmentIds, departmentId, email: normalizedEmail, name, role: normalizedRole, status },
     })
 
     return res.status(204).send()
   } catch (error) {
     await connection.rollback()
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'This email is already used by another user.' })
+    }
     return next(error)
   } finally {
     connection.release()
@@ -944,6 +1076,8 @@ async function createCustomerProjectForFlow(connection, { createdByUserId, flowI
 
   return {
     id: customerResult.insertId,
+    firstPhaseId: firstPhaseRows[0].id,
+    name,
     slug,
   }
 }
@@ -968,6 +1102,11 @@ async function createCustomer(req, res, next) {
       flowId: templateId,
       name,
     })
+    const notification = await getPhaseNotificationContext(connection, {
+      customerId: customer.id,
+      phaseId: customer.firstPhaseId,
+    })
+
     await connection.commit()
 
     await logAdminAction(req, {
@@ -975,6 +1114,11 @@ async function createCustomer(req, res, next) {
       entityType: 'system',
       entityId: customer.id,
       afterData: { flowId: templateId, name, slug: customer.slug },
+    })
+
+    await sendCustomerCreatedNotification({
+      actorUserId: req.user.id,
+      notification,
     })
 
     return res.status(201).json(customer)
@@ -1010,6 +1154,11 @@ async function createProjectWithFlow(req, res, next) {
       name: projectName,
     })
 
+    const notification = await getPhaseNotificationContext(connection, {
+      customerId: customer.id,
+      phaseId: customer.firstPhaseId,
+    })
+
     await connection.commit()
 
     await logAdminAction(req, {
@@ -1022,6 +1171,11 @@ async function createProjectWithFlow(req, res, next) {
         projectName,
         sourceFlowId: flow.sourceFlowId,
       },
+    })
+
+    await sendCustomerCreatedNotification({
+      actorUserId: req.user.id,
+      notification,
     })
 
     return res.status(201).json({
