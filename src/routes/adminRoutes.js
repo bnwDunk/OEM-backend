@@ -5,6 +5,7 @@ const {
   createFlow,
   createProjectWithFlow,
   createUser,
+  deleteTag,
   deleteUser,
   deleteCustomer,
   deleteFlow,
@@ -12,7 +13,9 @@ const {
   listCustomers,
   listDepartments,
   listFlows,
+  listTags,
   listUsers,
+  updateTag,
   updateCustomer,
   updateDepartment,
   updateFlow,
@@ -46,6 +49,10 @@ router.get('/customers', listCustomers)
 router.post('/customers', createCustomer)
 router.patch('/customers/:id', updateCustomer)
 router.delete('/customers/:id', deleteCustomer)
+
+router.get('/tags', listTags)
+router.patch('/tags/:id', updateTag)
+router.delete('/tags/:id', deleteTag)
 
 router.post('/project-flows', createProjectWithFlow)
 

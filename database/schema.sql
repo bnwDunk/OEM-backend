@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS customers (
   cost_package DECIMAL(12,2) NULL DEFAULT NULL,
   price DECIMAL(12,2) NULL DEFAULT NULL,
   volume DECIMAL(12,2) NULL DEFAULT NULL,
-  status ENUM('active', 'completed', 'paused', 'cancelled') NOT NULL DEFAULT 'active',
+  status ENUM('brief_spec', 'sampling', 'sample_revision', 'follow_up_formula', 'quote_negotiation', 'success') NOT NULL DEFAULT 'brief_spec',
   created_by BIGINT UNSIGNED NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -430,15 +430,6 @@ VALUES
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   sort_order = VALUES(sort_order);
-
-INSERT INTO customer_tags (name)
-VALUES
-  ('น้ำเชื่อมใส'),
-  ('Zero Sugar'),
-  ('อาหารเสริม'),
-  ('แบ่งบรรจุ'),
-  ('น้ำหวานแต่งกลิ่น')
-ON DUPLICATE KEY UPDATE name = VALUES(name);
 
 INSERT INTO workflow_templates (code, name, version)
 VALUES ('OEM_FLOW', 'OEM Flow', 1)

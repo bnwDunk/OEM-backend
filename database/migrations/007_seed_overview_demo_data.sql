@@ -24,17 +24,10 @@ ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   global_order = VALUES(global_order);
 
-INSERT INTO customer_tags (name)
-VALUES
-  ('น้ำหวานแต่งกลิ่น'),
-  ('Zero Sugar'),
-  ('อาหารเสริม')
-ON DUPLICATE KEY UPDATE name = VALUES(name);
-
 INSERT INTO customers (slug, name, cost_syrup, cost_package, price, volume, status)
 VALUES
-  ('siam-foods', 'บริษัท สยามฟู้ดส์ จำกัด', 21.00, 4.00, 44.86, 2600, 'active'),
-  ('green-plus', 'Green Plus Lab', 18.50, 6.20, 58.00, 8000, 'active')
+  ('siam-foods', 'บริษัท สยามฟู้ดส์ จำกัด', 21.00, 4.00, 44.86, 2600, 'brief_spec'),
+  ('green-plus', 'Green Plus Lab', 18.50, 6.20, 58.00, 8000, 'brief_spec')
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   cost_syrup = VALUES(cost_syrup),
@@ -42,12 +35,6 @@ ON DUPLICATE KEY UPDATE
   price = VALUES(price),
   volume = VALUES(volume),
   status = VALUES(status);
-
-INSERT IGNORE INTO customer_tag_assignments (customer_id, tag_id)
-VALUES
-  ((SELECT id FROM customers WHERE slug = 'siam-foods'), (SELECT id FROM customer_tags WHERE name = 'น้ำหวานแต่งกลิ่น')),
-  ((SELECT id FROM customers WHERE slug = 'green-plus'), (SELECT id FROM customer_tags WHERE name = 'Zero Sugar')),
-  ((SELECT id FROM customers WHERE slug = 'green-plus'), (SELECT id FROM customer_tags WHERE name = 'อาหารเสริม'));
 
 INSERT INTO customer_workflows (customer_id, template_id, current_phase_id, status)
 VALUES

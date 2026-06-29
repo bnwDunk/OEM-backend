@@ -34,6 +34,18 @@ async function ensureProductionSchema() {
 
   try {
     const changes = []
+    const customerStatusEnum = "ENUM('brief_spec', 'sampling', 'sample_revision', 'follow_up_formula', 'quote_negotiation', 'success') NOT NULL DEFAULT 'brief_spec'"
+    const demoTagNames = [
+      'น้ำเชื่อมใส',
+      'Zero Sugar',
+      'อาหารเสริม',
+      'แบ่งบรรจุ',
+      'น้ำหวานแต่งกลิ่น',
+      'เธเนเธณเน€เธเธทเนเธญเธกเนเธช',
+      'เธญเธฒเธซเธฒเธฃเน€เธชเธฃเธดเธก',
+      'เนเธเนเธเธเธฃเธฃเธเธธ',
+      'เธเนเธณเธซเธงเธฒเธเนเธ•เนเธเธเธฅเธดเนเธ',
+    ]
 
     await connection.query(
       `CREATE TABLE IF NOT EXISTS user_departments (
@@ -81,6 +93,57 @@ async function ensureProductionSchema() {
     if (await addColumnIfMissing(connection, 'customer_tags', 'is_active', 'is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER color')) {
       changes.push('customer_tags.is_active')
     }
+
+    const demoTagPlaceholders = demoTagNames.map(() => '?').join(', ')
+    const [demoAssignmentResult] = await connection.execute(
+      `DELETE customer_tag_assignments
+       FROM customer_tag_assignments
+       INNER JOIN customer_tags
+         ON customer_tags.id = customer_tag_assignments.tag_id
+       WHERE customer_tags.name IN (${demoTagPlaceholders})`,
+      demoTagNames,
+    )
+
+    const [demoTagResult] = await connection.execute(
+      `UPDATE customer_tags
+       SET is_active = 0
+       WHERE name IN (${demoTagPlaceholders})`,
+      demoTagNames,
+    )
+
+    if (demoAssignmentResult.affectedRows || demoTagResult.affectedRows) {
+      changes.push('removed demo customer tags')
+    }
+
+    await connection.query(
+      `ALTER TABLE customers
+       MODIFY COLUMN status ENUM(
+         'active',
+         'completed',
+         'paused',
+         'cancelled',
+         'brief_spec',
+         'sampling',
+         'sample_revision',
+         'follow_up_formula',
+         'quote_negotiation',
+         'success'
+       ) NOT NULL DEFAULT 'brief_spec'`,
+    )
+
+    await connection.execute(
+      `UPDATE customers
+       SET status = CASE status
+         WHEN 'completed' THEN 'success'
+         WHEN 'active' THEN 'brief_spec'
+         WHEN 'paused' THEN 'follow_up_formula'
+         WHEN 'cancelled' THEN 'follow_up_formula'
+         ELSE status
+       END`,
+    )
+
+    await connection.query(`ALTER TABLE customers MODIFY COLUMN status ${customerStatusEnum}`)
+    changes.push('customers.status')
 
     if (await addColumnIfMissing(connection, 'workflow_templates', 'parent_template_id', 'parent_template_id BIGINT UNSIGNED NULL DEFAULT NULL AFTER id')) {
       changes.push('workflow_templates.parent_template_id')
