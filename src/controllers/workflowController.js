@@ -730,10 +730,206 @@ async function completeBranch(req, res, next) {
   }
 }
 
+async function resetPhase(req, res, next) {
+  const connection = await pool.getConnection()
+
+  try {
+    const { id, phaseIndex } = req.params
+    const mode = req.body.mode === 'single' ? 'single' : 'all'
+    const phaseOrder = Number(phaseIndex) + 1
+
+    await connection.beginTransaction()
+
+    const [targetRows] = await connection.execute(
+      `SELECT
+         customer_workflows.id AS customer_workflow_id,
+         workflow_phases.id AS phase_id
+       FROM customers
+       INNER JOIN customer_workflows
+         ON customer_workflows.customer_id = customers.id
+        AND customer_workflows.status = 'active'
+       INNER JOIN workflow_phases
+         ON workflow_phases.global_order = ?
+       INNER JOIN workflow_stages
+         ON workflow_stages.id = workflow_phases.stage_id
+        AND workflow_stages.template_id = customer_workflows.template_id
+       WHERE customers.id = ?
+       LIMIT 1`,
+      [phaseOrder, id],
+    )
+
+    const target = targetRows[0]
+    if (!target) {
+      await connection.rollback()
+      return res.status(404).json({ message: 'Workflow phase not found.' })
+    }
+
+    if (mode === 'all') {
+      await connection.execute(
+        `UPDATE customer_workflows
+         SET current_phase_id = ?
+         WHERE id = ?`,
+        [target.phase_id, target.customer_workflow_id],
+      )
+
+      await connection.execute(
+        `UPDATE customer_phase_states
+         INNER JOIN workflow_phases
+           ON workflow_phases.id = customer_phase_states.phase_id
+         SET
+           customer_phase_states.status = CASE
+             WHEN workflow_phases.global_order = ? THEN 'active'
+             WHEN workflow_phases.global_order > ? THEN 'locked'
+             ELSE customer_phase_states.status
+           END,
+           customer_phase_states.reset_mode = CASE
+             WHEN workflow_phases.global_order >= ? THEN 'all'
+             ELSE customer_phase_states.reset_mode
+           END,
+           customer_phase_states.reset_by_department_id = CASE
+             WHEN workflow_phases.global_order >= ? THEN ?
+             ELSE customer_phase_states.reset_by_department_id
+           END,
+           customer_phase_states.reset_by_user_id = CASE
+             WHEN workflow_phases.global_order >= ? THEN ?
+             ELSE customer_phase_states.reset_by_user_id
+           END,
+           customer_phase_states.reset_at = CASE
+             WHEN workflow_phases.global_order >= ? THEN NOW()
+             ELSE customer_phase_states.reset_at
+           END,
+           customer_phase_states.completed_at = CASE
+             WHEN workflow_phases.global_order >= ? THEN NULL
+             ELSE customer_phase_states.completed_at
+           END
+         WHERE customer_phase_states.customer_workflow_id = ?
+           AND workflow_phases.global_order >= ?`,
+        [
+          phaseOrder,
+          phaseOrder,
+          phaseOrder,
+          phaseOrder,
+          req.user.departmentId || null,
+          phaseOrder,
+          req.user.id,
+          phaseOrder,
+          phaseOrder,
+          target.customer_workflow_id,
+          phaseOrder,
+        ],
+      )
+
+      await connection.execute(
+        `UPDATE customer_branch_states
+         INNER JOIN customer_phase_states
+           ON customer_phase_states.id = customer_branch_states.customer_phase_state_id
+         INNER JOIN workflow_phases
+           ON workflow_phases.id = customer_phase_states.phase_id
+         SET
+           customer_branch_states.status = CASE
+             WHEN workflow_phases.global_order = ? THEN 'active'
+             ELSE 'waiting'
+           END,
+           customer_branch_states.saved_at = NULL,
+           customer_branch_states.completed_by_user_id = NULL,
+           customer_branch_states.completed_at = NULL
+         WHERE customer_phase_states.customer_workflow_id = ?
+           AND workflow_phases.global_order >= ?`,
+        [phaseOrder, target.customer_workflow_id, phaseOrder],
+      )
+
+      await connection.execute(
+        `UPDATE customer_checklist_states
+         INNER JOIN customer_branch_states
+           ON customer_branch_states.id = customer_checklist_states.customer_branch_state_id
+         INNER JOIN customer_phase_states
+           ON customer_phase_states.id = customer_branch_states.customer_phase_state_id
+         INNER JOIN workflow_phases
+           ON workflow_phases.id = customer_phase_states.phase_id
+         SET
+           customer_checklist_states.live_checked = 0,
+           customer_checklist_states.saved_checked = 0,
+           customer_checklist_states.checked_by_user_id = NULL,
+           customer_checklist_states.checked_at = NULL
+         WHERE customer_phase_states.customer_workflow_id = ?
+           AND workflow_phases.global_order >= ?`,
+        [target.customer_workflow_id, phaseOrder],
+      )
+    } else {
+      await connection.execute(
+        `UPDATE customer_phase_states
+         SET
+           status = 'reset',
+           reset_mode = 'single',
+           reset_by_department_id = ?,
+           reset_by_user_id = ?,
+           reset_at = NOW(),
+           completed_at = NULL
+         WHERE customer_workflow_id = ?
+           AND phase_id = ?`,
+        [req.user.departmentId || null, req.user.id, target.customer_workflow_id, target.phase_id],
+      )
+
+      await connection.execute(
+        `UPDATE customer_branch_states
+         INNER JOIN customer_phase_states
+           ON customer_phase_states.id = customer_branch_states.customer_phase_state_id
+         SET
+           customer_branch_states.status = 'active',
+           customer_branch_states.saved_at = NULL,
+           customer_branch_states.completed_by_user_id = NULL,
+           customer_branch_states.completed_at = NULL
+         WHERE customer_phase_states.customer_workflow_id = ?
+           AND customer_phase_states.phase_id = ?`,
+        [target.customer_workflow_id, target.phase_id],
+      )
+
+      await connection.execute(
+        `UPDATE customer_checklist_states
+         INNER JOIN customer_branch_states
+           ON customer_branch_states.id = customer_checklist_states.customer_branch_state_id
+         INNER JOIN customer_phase_states
+           ON customer_phase_states.id = customer_branch_states.customer_phase_state_id
+         SET
+           customer_checklist_states.live_checked = 0,
+           customer_checklist_states.saved_checked = 0,
+           customer_checklist_states.checked_by_user_id = NULL,
+           customer_checklist_states.checked_at = NULL
+         WHERE customer_phase_states.customer_workflow_id = ?
+           AND customer_phase_states.phase_id = ?`,
+        [target.customer_workflow_id, target.phase_id],
+      )
+    }
+
+    await connection.execute(
+      `INSERT INTO workflow_activity_logs (customer_id, phase_id, actor_user_id, actor_department_id, action, message, metadata)
+       VALUES (?, ?, ?, ?, 'reset_phase', ?, ?)`,
+      [
+        id,
+        target.phase_id,
+        req.user.id,
+        req.user.departmentId || null,
+        `Reset ${mode} phase ${phaseOrder}`,
+        JSON.stringify({ mode, phaseIndex: Number(phaseIndex) }),
+      ],
+    )
+
+    await connection.commit()
+
+    return res.json({ reset: true, mode })
+  } catch (error) {
+    await connection.rollback()
+    return next(error)
+  } finally {
+    connection.release()
+  }
+}
+
 module.exports = {
   addCustomerTag,
   completeBranch,
   listOverview,
   listTags,
+  resetPhase,
   saveBranchProgress,
 }
