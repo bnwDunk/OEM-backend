@@ -370,6 +370,7 @@ async function listOverview(req, res, next) {
          customers.id,
          customers.slug,
          customers.name,
+         customers.status,
          customers.cost_syrup,
          customers.cost_package,
          customers.price,
@@ -388,7 +389,6 @@ async function listOverview(req, res, next) {
          GROUP BY workflow_stages.template_id
        ) AS first_phase
          ON first_phase.template_id = customer_workflows.template_id
-       WHERE customers.status = 'active'
        ORDER BY customers.updated_at DESC, customers.id DESC`,
     )
 
@@ -408,6 +408,7 @@ async function listOverview(req, res, next) {
        INNER JOIN customer_tags
          ON customer_tags.id = customer_tag_assignments.tag_id
        WHERE customer_tag_assignments.customer_id IN (${placeholders})
+         AND customer_tags.is_active = 1
        ORDER BY customer_tags.name ASC`,
       customerIds,
     )
@@ -490,6 +491,7 @@ async function listOverview(req, res, next) {
           id: row.slug || customerId,
           databaseId: row.id,
           name: row.name,
+          status: row.status,
           currentPhase: Math.max(0, Number(row.current_phase_order || 0) - 1),
           tags: (tagsByCustomer.get(customerId) || []).map((tag) => ({
             id: tag.id,
@@ -584,6 +586,52 @@ async function addCustomerTag(req, res, next) {
     )
 
     return res.status(201).json({ id: resolvedTagId })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function updateTag(req, res, next) {
+  try {
+    const { id } = req.params
+    const name = String(req.body.name || '').trim()
+    const color = normalizeColor(req.body.color)
+
+    if (!name) return res.status(400).json({ message: 'Tag name is required.' })
+
+    const [tagRows] = await pool.execute(
+      'SELECT id FROM customer_tags WHERE id = ? AND is_active = 1 LIMIT 1',
+      [id],
+    )
+    if (!tagRows[0]) return res.status(404).json({ message: 'Tag not found.' })
+
+    await pool.execute(
+      `UPDATE customer_tags
+       SET name = ?, color = ?
+       WHERE id = ?`,
+      [name, color, id],
+    )
+
+    return res.status(204).send()
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'A tag with this name already exists.' })
+    }
+    return next(error)
+  }
+}
+
+async function removeCustomerTag(req, res, next) {
+  try {
+    const { id, tagId } = req.params
+
+    await pool.execute(
+      `DELETE FROM customer_tag_assignments
+       WHERE customer_id = ? AND tag_id = ?`,
+      [id, tagId],
+    )
+
+    return res.status(204).send()
   } catch (error) {
     return next(error)
   }
@@ -930,6 +978,8 @@ module.exports = {
   completeBranch,
   listOverview,
   listTags,
+  removeCustomerTag,
   resetPhase,
   saveBranchProgress,
+  updateTag,
 }

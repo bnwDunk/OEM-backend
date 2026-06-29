@@ -2,6 +2,15 @@ const bcrypt = require('bcryptjs')
 const pool = require('../config/db')
 const { sendPhaseAdvancedEmail } = require('../services/mailService')
 
+const customerStatuses = new Set([
+  'brief_spec',
+  'sampling',
+  'sample_revision',
+  'follow_up_formula',
+  'quote_negotiation',
+  'success',
+])
+
 function mapUser(row) {
   const departmentIds = row.department_ids ? String(row.department_ids).split(',') : []
   const departmentNames = row.department_names ? String(row.department_names).split('\n') : []
@@ -62,8 +71,28 @@ function mapCustomer(row) {
     flowName: row.flow_name,
     currentPhaseId: row.current_phase_id,
     currentPhaseName: row.current_phase_name,
+    costSyrup: row.cost_syrup,
+    costPackage: row.cost_package,
+    price: row.price,
+    volume: row.volume,
     updatedAt: row.updated_at,
   }
+}
+
+function mapTag(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    color: row.color,
+    status: row.is_active ? 'active' : 'inactive',
+    customerCount: Number(row.customer_count || 0),
+    updatedAt: row.updated_at,
+  }
+}
+
+function normalizeColor(color) {
+  const value = String(color || '').trim()
+  return /^#[0-9A-Fa-f]{6}$/.test(value) ? value : '#0f766e'
 }
 
 function makeCode(name) {
@@ -880,6 +909,101 @@ async function listCustomers(req, res, next) {
   }
 }
 
+async function listTags(req, res, next) {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT
+         customer_tags.id,
+         customer_tags.name,
+         customer_tags.color,
+         customer_tags.is_active,
+         customer_tags.updated_at,
+         COUNT(customer_tag_assignments.customer_id) AS customer_count
+       FROM customer_tags
+       LEFT JOIN customer_tag_assignments
+         ON customer_tag_assignments.tag_id = customer_tags.id
+       WHERE customer_tags.is_active = 1
+       GROUP BY
+         customer_tags.id,
+         customer_tags.name,
+         customer_tags.color,
+         customer_tags.is_active,
+         customer_tags.updated_at
+       ORDER BY customer_tags.updated_at DESC, customer_tags.name ASC`,
+    )
+
+    return res.json({ tags: rows.map(mapTag) })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function updateTag(req, res, next) {
+  try {
+    const { id } = req.params
+    const name = String(req.body.name || '').trim()
+    const color = normalizeColor(req.body.color)
+
+    if (!name) return res.status(400).json({ message: 'Tag name is required.' })
+
+    const [beforeRows] = await pool.execute('SELECT * FROM customer_tags WHERE id = ? LIMIT 1', [id])
+    if (!beforeRows[0]) return res.status(404).json({ message: 'Tag not found.' })
+
+    await pool.execute(
+      `UPDATE customer_tags
+       SET name = ?, color = ?, is_active = 1
+       WHERE id = ?`,
+      [name, color, id],
+    )
+
+    await logAdminAction(req, {
+      action: 'update_tag',
+      entityType: 'system',
+      entityId: Number(id),
+      beforeData: beforeRows[0],
+      afterData: { name, color },
+    })
+
+    return res.status(204).send()
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'A tag with this name already exists.' })
+    }
+    return next(error)
+  }
+}
+
+async function deleteTag(req, res, next) {
+  const connection = await pool.getConnection()
+
+  try {
+    const { id } = req.params
+    const [beforeRows] = await connection.execute('SELECT * FROM customer_tags WHERE id = ? LIMIT 1', [id])
+    if (!beforeRows[0]) {
+      return res.status(404).json({ message: 'Tag not found.' })
+    }
+
+    await connection.beginTransaction()
+    await connection.execute('DELETE FROM customer_tag_assignments WHERE tag_id = ?', [id])
+    await connection.execute('UPDATE customer_tags SET is_active = 0 WHERE id = ?', [id])
+    await connection.commit()
+
+    await logAdminAction(req, {
+      action: 'delete_tag',
+      entityType: 'system',
+      entityId: Number(id),
+      beforeData: beforeRows[0],
+    })
+
+    return res.status(204).send()
+  } catch (error) {
+    await connection.rollback()
+    return next(error)
+  } finally {
+    connection.release()
+  }
+}
+
 async function cloneFlowTemplate(connection, sourceFlowId, newTemplateId) {
   const [stages] = await connection.execute(
     'SELECT id, name, sort_order FROM workflow_stages WHERE template_id = ? ORDER BY sort_order ASC',
@@ -1062,7 +1186,7 @@ async function createCustomerProjectForFlow(connection, { createdByUserId, flowI
   const slug = await makeUniqueCustomerSlug(connection, name)
   const [customerResult] = await connection.execute(
     `INSERT INTO customers (slug, name, status, created_by)
-     VALUES (?, ?, 'active', ?)`,
+     VALUES (?, ?, 'brief_spec', ?)`,
     [slug, name, createdByUserId],
   )
 
@@ -1199,7 +1323,11 @@ async function createProjectWithFlow(req, res, next) {
 async function updateCustomer(req, res, next) {
   try {
     const { id } = req.params
-    const { name, status } = req.body
+    const { costPackage, costSyrup, name, price, status, volume } = req.body
+
+    if (status && !customerStatuses.has(status)) {
+      return res.status(400).json({ message: 'Invalid customer status.' })
+    }
 
     const [beforeRows] = await pool.execute('SELECT * FROM customers WHERE id = ? LIMIT 1', [id])
     if (!beforeRows[0]) return res.status(404).json({ message: 'Customer not found.' })
@@ -1207,9 +1335,21 @@ async function updateCustomer(req, res, next) {
     await pool.execute(
       `UPDATE customers
        SET name = COALESCE(?, name),
-           status = COALESCE(?, status)
+           status = COALESCE(?, status),
+           cost_syrup = COALESCE(?, cost_syrup),
+           cost_package = COALESCE(?, cost_package),
+           price = COALESCE(?, price),
+           volume = COALESCE(?, volume)
        WHERE id = ?`,
-      [name ?? null, status ?? null, id],
+      [
+        name ?? null,
+        status ?? null,
+        costSyrup ?? null,
+        costPackage ?? null,
+        price ?? null,
+        volume ?? null,
+        id,
+      ],
     )
 
     await logAdminAction(req, {
@@ -1217,7 +1357,7 @@ async function updateCustomer(req, res, next) {
       entityType: 'system',
       entityId: Number(id),
       beforeData: beforeRows[0],
-      afterData: { name, status },
+      afterData: { costPackage, costSyrup, name, price, status, volume },
     })
 
     return res.status(204).send()
@@ -1352,6 +1492,7 @@ module.exports = {
   createFlow,
   createProjectWithFlow,
   createUser,
+  deleteTag,
   deleteUser,
   deleteCustomer,
   deleteFlow,
@@ -1359,7 +1500,9 @@ module.exports = {
   listCustomers,
   listDepartments,
   listFlows,
+  listTags,
   listUsers,
+  updateTag,
   updateCustomer,
   updateDepartment,
   updateFlow,
