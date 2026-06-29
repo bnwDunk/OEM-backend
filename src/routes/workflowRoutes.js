@@ -4,6 +4,7 @@ const {
   completeBranch,
   listOverview,
   listTags,
+  resetPhase,
   saveBranchProgress,
 } = require('../controllers/workflowController')
 const authenticate = require('../middleware/authenticate')
@@ -17,5 +18,6 @@ router.get('/tags', listTags)
 router.post('/customers/:id/tags', addCustomerTag)
 router.put('/customers/:id/phases/:phaseIndex/branches/:branchIndex', saveBranchProgress)
 router.post('/customers/:id/phases/:phaseIndex/branches/:branchIndex/complete', completeBranch)
+router.post('/customers/:id/phases/:phaseIndex/reset', resetPhase)
 
 module.exports = router
