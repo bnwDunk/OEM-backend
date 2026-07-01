@@ -66,6 +66,8 @@ function mapCustomer(row) {
     id: row.id,
     slug: row.slug,
     name: row.name,
+    dueDate: row.due_date,
+    salesperson: row.salesperson,
     status: row.status,
     flowId: row.template_id,
     flowName: row.flow_name,
@@ -93,6 +95,52 @@ function mapTag(row) {
 function normalizeColor(color) {
   const value = String(color || '').trim()
   return /^#[0-9A-Fa-f]{6}$/.test(value) ? value : '#0f766e'
+}
+
+function normalizeNullableText(value) {
+  const text = String(value || '').trim()
+  return text || null
+}
+
+function normalizeDueDate(value) {
+  const text = String(value || '').trim()
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null
+}
+
+function parseTagNames(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item, index, items) => items.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index)
+}
+
+async function replaceCustomerTags(connection, customerId, tagsText) {
+  const tagNames = parseTagNames(tagsText)
+
+  await connection.execute('DELETE FROM customer_tag_assignments WHERE customer_id = ?', [customerId])
+
+  for (const tagName of tagNames) {
+    await connection.execute(
+      `INSERT INTO customer_tags (name, color, is_active)
+       VALUES (?, ?, 1)
+       ON DUPLICATE KEY UPDATE is_active = 1`,
+      [tagName, '#0f766e'],
+    )
+
+    const [tagRows] = await connection.execute(
+      'SELECT id FROM customer_tags WHERE name = ? LIMIT 1',
+      [tagName],
+    )
+
+    if (tagRows[0]) {
+      await connection.execute(
+        `INSERT IGNORE INTO customer_tag_assignments (customer_id, tag_id)
+         VALUES (?, ?)`,
+        [customerId, tagRows[0].id],
+      )
+    }
+  }
 }
 
 function makeCode(name) {
@@ -887,6 +935,12 @@ async function listCustomers(req, res, next) {
          customers.slug,
          customers.name,
          customers.status,
+         customers.cost_syrup,
+         customers.cost_package,
+         customers.price,
+         customers.volume,
+         customers.due_date,
+         customers.salesperson,
          customers.updated_at,
          customer_workflows.template_id,
          customer_workflows.current_phase_id,
@@ -1321,48 +1375,86 @@ async function createProjectWithFlow(req, res, next) {
 }
 
 async function updateCustomer(req, res, next) {
+  const connection = await pool.getConnection()
+
   try {
     const { id } = req.params
-    const { costPackage, costSyrup, name, price, status, volume } = req.body
+    const { costPackage, costSyrup, dueDate, name, price, salesperson, status, tagsText, volume } = req.body
 
     if (status && !customerStatuses.has(status)) {
       return res.status(400).json({ message: 'Invalid customer status.' })
     }
 
-    const [beforeRows] = await pool.execute('SELECT * FROM customers WHERE id = ? LIMIT 1', [id])
+    const [beforeRows] = await connection.execute('SELECT * FROM customers WHERE id = ? LIMIT 1', [id])
     if (!beforeRows[0]) return res.status(404).json({ message: 'Customer not found.' })
 
-    await pool.execute(
-      `UPDATE customers
-       SET name = COALESCE(?, name),
-           status = COALESCE(?, status),
-           cost_syrup = COALESCE(?, cost_syrup),
-           cost_package = COALESCE(?, cost_package),
-           price = COALESCE(?, price),
-           volume = COALESCE(?, volume)
-       WHERE id = ?`,
-      [
-        name ?? null,
-        status ?? null,
-        costSyrup ?? null,
-        costPackage ?? null,
-        price ?? null,
-        volume ?? null,
-        id,
-      ],
-    )
+    await connection.beginTransaction()
+
+    const updates = []
+    const values = []
+
+    if (name !== undefined) {
+      updates.push('name = ?')
+      values.push(name)
+    }
+    if (status !== undefined) {
+      updates.push('status = ?')
+      values.push(status)
+    }
+    if (costSyrup !== undefined) {
+      updates.push('cost_syrup = ?')
+      values.push(costSyrup)
+    }
+    if (costPackage !== undefined) {
+      updates.push('cost_package = ?')
+      values.push(costPackage)
+    }
+    if (price !== undefined) {
+      updates.push('price = ?')
+      values.push(price)
+    }
+    if (volume !== undefined) {
+      updates.push('volume = ?')
+      values.push(volume)
+    }
+    if (dueDate !== undefined) {
+      updates.push('due_date = ?')
+      values.push(normalizeDueDate(dueDate))
+    }
+    if (salesperson !== undefined) {
+      updates.push('salesperson = ?')
+      values.push(normalizeNullableText(salesperson))
+    }
+
+    if (updates.length > 0) {
+      await connection.execute(
+        `UPDATE customers
+         SET ${updates.join(', ')}
+         WHERE id = ?`,
+        [...values, id],
+      )
+    }
+
+    if (tagsText !== undefined) {
+      await replaceCustomerTags(connection, id, tagsText)
+    }
+
+    await connection.commit()
 
     await logAdminAction(req, {
       action: 'update_customer',
       entityType: 'system',
       entityId: Number(id),
       beforeData: beforeRows[0],
-      afterData: { costPackage, costSyrup, name, price, status, volume },
+      afterData: { costPackage, costSyrup, dueDate, name, price, salesperson, status, tagsText, volume },
     })
 
     return res.status(204).send()
   } catch (error) {
+    await connection.rollback()
     return next(error)
+  } finally {
+    connection.release()
   }
 }
 

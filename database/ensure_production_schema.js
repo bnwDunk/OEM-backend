@@ -115,6 +115,14 @@ async function ensureProductionSchema() {
       changes.push('removed demo customer tags')
     }
 
+    if (await addColumnIfMissing(connection, 'customers', 'due_date', 'due_date DATE NULL DEFAULT NULL AFTER volume')) {
+      changes.push('customers.due_date')
+    }
+
+    if (await addColumnIfMissing(connection, 'customers', 'salesperson', 'salesperson VARCHAR(190) NULL DEFAULT NULL AFTER due_date')) {
+      changes.push('customers.salesperson')
+    }
+
     await connection.query(
       `ALTER TABLE customers
        MODIFY COLUMN status ENUM(

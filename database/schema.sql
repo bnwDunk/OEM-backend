@@ -106,6 +106,8 @@ CREATE TABLE IF NOT EXISTS customers (
   cost_package DECIMAL(12,2) NULL DEFAULT NULL,
   price DECIMAL(12,2) NULL DEFAULT NULL,
   volume DECIMAL(12,2) NULL DEFAULT NULL,
+  due_date DATE NULL DEFAULT NULL,
+  salesperson VARCHAR(190) NULL DEFAULT NULL,
   status ENUM('brief_spec', 'sampling', 'sample_revision', 'follow_up_formula', 'quote_negotiation', 'success') NOT NULL DEFAULT 'brief_spec',
   created_by BIGINT UNSIGNED NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
