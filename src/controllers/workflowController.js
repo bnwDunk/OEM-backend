@@ -13,6 +13,12 @@ function formatVolume(value) {
   }).format(Number(value))
 }
 
+function formatDateInput(value) {
+  if (!value) return ''
+  if (typeof value === 'string') return value.slice(0, 10)
+  return value.toISOString().slice(0, 10)
+}
+
 function formatRelativeTime(value) {
   if (!value) return ''
 
@@ -375,6 +381,8 @@ async function listOverview(req, res, next) {
          customers.cost_package,
          customers.price,
          customers.volume,
+         customers.due_date,
+         customers.salesperson,
          COALESCE(current_phase.global_order, first_phase.global_order, 0) AS current_phase_order
        FROM customers
        LEFT JOIN customer_workflows
@@ -491,6 +499,8 @@ async function listOverview(req, res, next) {
           id: row.slug || customerId,
           databaseId: row.id,
           name: row.name,
+          dueDate: formatDateInput(row.due_date),
+          salesperson: row.salesperson || '',
           status: row.status,
           currentPhase: Math.max(0, Number(row.current_phase_order || 0) - 1),
           tags: (tagsByCustomer.get(customerId) || []).map((tag) => ({
