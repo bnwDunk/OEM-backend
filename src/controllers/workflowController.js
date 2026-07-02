@@ -436,9 +436,12 @@ async function listOverview(req, res, next) {
          workflow_issues.message,
          workflow_issues.status,
          workflow_issues.created_at,
+         workflow_phases.global_order AS phase_order,
          opened_departments.name AS opened_by_department,
          target_departments.name AS target_department
        FROM workflow_issues
+       LEFT JOIN workflow_phases
+         ON workflow_phases.id = workflow_issues.phase_id
        INNER JOIN departments AS opened_departments
          ON opened_departments.id = workflow_issues.opened_by_department_id
        INNER JOIN departments AS target_departments
@@ -461,7 +464,7 @@ async function listOverview(req, res, next) {
            ORDER BY workflow_phase_branches.sort_order ASC, workflow_phase_branches.id ASC
          ) AS branch_position,
          ROW_NUMBER() OVER (
-           PARTITION BY workflow_phase_branches.id
+           PARTITION BY customer_branch_states.id
            ORDER BY workflow_checklist_items.sort_order ASC, workflow_checklist_items.id ASC
          ) AS item_position
        FROM customer_workflows
@@ -524,6 +527,7 @@ async function listOverview(req, res, next) {
             targetDept: issue.target_department,
             text: issue.message,
             closed: issue.status === 'closed',
+            phase: issue.phase_order ? Math.max(0, Number(issue.phase_order) - 1) : undefined,
             time: formatRelativeTime(issue.created_at),
           })),
           ...(workflowState ? {
@@ -717,11 +721,6 @@ async function completeBranch(req, res, next) {
 
     assertDepartmentCanManage(req, branchContext)
     assertBranchCanUpdate(branchContext)
-
-    if (!Array.isArray(live) || !live.every(Boolean)) {
-      await connection.rollback()
-      return res.status(400).json({ message: 'All checklist items must be checked before completing this branch.' })
-    }
 
     await updateChecklist(connection, {
       branchStateId: branchContext.customer_branch_state_id,
