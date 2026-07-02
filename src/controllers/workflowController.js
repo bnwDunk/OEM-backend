@@ -1,5 +1,5 @@
 const pool = require('../config/db')
-const { sendPhaseAdvancedEmail } = require('../services/mailService')
+const { sendPhaseAdvancedEmail, sendTicketCreatedEmail } = require('../services/mailService')
 
 function formatMoney(value) {
   if (value === null || value === undefined) return ''
@@ -207,9 +207,15 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
        workflow_phases.label,
        workflow_phases.name,
        workflow_phases.global_order,
+       workflow_stages.stage_position,
        workflow_stages.name AS stage_name
      FROM workflow_phases
-     INNER JOIN workflow_stages
+     INNER JOIN (
+       SELECT
+         workflow_stages.*,
+         ROW_NUMBER() OVER (PARTITION BY workflow_stages.template_id ORDER BY workflow_stages.sort_order ASC, workflow_stages.id ASC) AS stage_position
+       FROM workflow_stages
+     ) AS workflow_stages
        ON workflow_stages.id = workflow_phases.stage_id
      INNER JOIN customer_workflows
        ON customer_workflows.template_id = workflow_stages.template_id
@@ -220,6 +226,17 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
   )
 
   if (!phaseRows[0]) return null
+
+  const [departmentRows] = await connection.execute(
+    `SELECT DISTINCT departments.name
+     FROM workflow_phase_branches
+     INNER JOIN departments
+       ON departments.id = workflow_phase_branches.department_id
+      AND departments.is_active = 1
+     WHERE workflow_phase_branches.phase_id = ?
+     ORDER BY departments.name ASC`,
+    [phaseId],
+  )
 
   const [recipientRows] = await connection.execute(
     `SELECT DISTINCT users.email
@@ -253,7 +270,10 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
 
   return {
     customer: customerRows[0] || null,
-    phase: phaseRows[0],
+    phase: {
+      ...phaseRows[0],
+      departments: departmentRows.map((row) => row.name),
+    },
     recipients: recipientRows.map((row) => row.email),
   }
 }
@@ -277,6 +297,21 @@ async function advanceWorkflowIfPhaseDone(connection, branchContext) {
      WHERE id = ?`,
     [branchContext.customer_phase_state_id],
   )
+
+  const [currentPhaseRows] = await connection.execute(
+    `SELECT workflow_phases.global_order
+     FROM customer_workflows
+     INNER JOIN workflow_phases
+       ON workflow_phases.id = customer_workflows.current_phase_id
+     WHERE customer_workflows.id = ?
+     LIMIT 1`,
+    [branchContext.customer_workflow_id],
+  )
+  const currentPhaseOrder = Number(currentPhaseRows[0]?.global_order || 0)
+
+  if (branchContext.phase_status === 'reset' && currentPhaseOrder > Number(branchContext.global_order)) {
+    return { advanced: false, completed: false, notification: null }
+  }
 
   const [nextPhaseRows] = await connection.execute(
     `SELECT workflow_phases.id
@@ -635,6 +670,179 @@ async function updateTag(req, res, next) {
   }
 }
 
+function getTicketName(message) {
+  const firstLine = String(message || '').split(/\r?\n/)[0].trim()
+  if (!firstLine) return 'Ticket'
+  return firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine
+}
+
+async function createIssue(req, res, next) {
+  const connection = await pool.getConnection()
+
+  try {
+    const { id } = req.params
+    const phaseIndex = Number(req.body.phase)
+    const openedByName = String(req.body.openedBy || req.user.name || '').trim()
+    const targetDept = String(req.body.targetDept || '').trim()
+    const message = String(req.body.text || req.body.message || '').trim()
+
+    if (!openedByName || !targetDept || !message) {
+      return res.status(400).json({ message: 'openedBy, targetDept, and text are required.' })
+    }
+
+    await connection.beginTransaction()
+
+    const [customerRows] = await connection.execute(
+      `SELECT
+         customers.id,
+         customers.name,
+         customer_workflows.id AS customer_workflow_id,
+         customer_workflows.template_id
+       FROM customers
+       LEFT JOIN customer_workflows
+         ON customer_workflows.customer_id = customers.id
+        AND customer_workflows.status = 'active'
+       WHERE customers.id = ?
+       LIMIT 1`,
+      [id],
+    )
+    const customer = customerRows[0]
+    if (!customer) {
+      await connection.rollback()
+      return res.status(404).json({ message: 'Customer not found.' })
+    }
+
+    const [targetDepartmentRows] = await connection.execute(
+      `SELECT id, name
+       FROM departments
+       WHERE LOWER(name) = LOWER(?)
+         AND is_active = 1
+       LIMIT 1`,
+      [targetDept],
+    )
+    const targetDepartment = targetDepartmentRows[0]
+    if (!targetDepartment) {
+      await connection.rollback()
+      return res.status(404).json({ message: 'Target department not found.' })
+    }
+
+    let openedByDepartmentId = req.user.departmentId || req.user.department_id || null
+    let openedByDepartmentName = req.user.department?.name || ''
+
+    if (!openedByDepartmentId && Array.isArray(req.user.departmentIds) && req.user.departmentIds[0]) {
+      openedByDepartmentId = req.user.departmentIds[0]
+    }
+
+    if (!openedByDepartmentName && openedByDepartmentId) {
+      const [departmentRows] = await connection.execute(
+        'SELECT name FROM departments WHERE id = ? LIMIT 1',
+        [openedByDepartmentId],
+      )
+      openedByDepartmentName = departmentRows[0]?.name || ''
+    }
+
+    if (!openedByDepartmentId) {
+      await connection.rollback()
+      return res.status(400).json({ message: 'Opened-by department is required.' })
+    }
+
+    let phaseId = null
+    if (Number.isInteger(phaseIndex) && phaseIndex >= 0 && customer.template_id) {
+      const [phaseRows] = await connection.execute(
+        `SELECT workflow_phases.id
+         FROM workflow_phases
+         INNER JOIN workflow_stages
+           ON workflow_stages.id = workflow_phases.stage_id
+          AND workflow_stages.template_id = ?
+         WHERE workflow_phases.global_order = ?
+         LIMIT 1`,
+        [customer.template_id, phaseIndex + 1],
+      )
+      phaseId = phaseRows[0]?.id || null
+    }
+
+    const [issueResult] = await connection.execute(
+      `INSERT INTO workflow_issues (
+         customer_id,
+         phase_id,
+         opened_by_user_id,
+         opened_by_name,
+         opened_by_department_id,
+         target_department_id,
+         message
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [customer.id, phaseId, req.user.id || null, openedByName, openedByDepartmentId, targetDepartment.id, message],
+    )
+
+    const [recipientRows] = await connection.execute(
+      `SELECT DISTINCT users.email
+       FROM users
+       WHERE users.is_active = 1
+         AND (
+           users.department_id = ?
+           OR EXISTS (
+             SELECT 1
+             FROM user_departments
+             WHERE user_departments.user_id = users.id
+               AND user_departments.department_id = ?
+           )
+         )
+       ORDER BY users.email ASC`,
+      [targetDepartment.id, targetDepartment.id],
+    )
+
+    await connection.commit()
+
+    const notification = {
+      customer,
+      phase: phaseId ? { id: phaseId, label: 'Ticket', name: getTicketName(message) } : { id: null, label: 'Ticket', name: getTicketName(message) },
+      recipients: recipientRows.map((row) => row.email),
+    }
+
+    try {
+      const result = await sendTicketCreatedEmail({
+        customerName: customer.name,
+        detail: message,
+        openedByDepartment: openedByDepartmentName,
+        openedByName,
+        recipients: notification.recipients,
+        targetDepartment: targetDepartment.name,
+        ticketName: getTicketName(message),
+      })
+      await recordEmailNotificationResult({
+        actorUserId: req.user.id,
+        notification,
+        result,
+      })
+    } catch (emailError) {
+      await recordEmailNotificationResult({
+        actorUserId: req.user.id,
+        error: emailError,
+        notification,
+      })
+    }
+
+    return res.status(201).json({
+      id: issueResult.insertId,
+      issue: {
+        openedBy: openedByName,
+        openedByDept: openedByDepartmentName,
+        targetDept: targetDepartment.name,
+        text: message,
+        closed: false,
+        phase: Number.isInteger(phaseIndex) ? phaseIndex : undefined,
+        time: formatRelativeTime(new Date()),
+      },
+    })
+  } catch (error) {
+    await connection.rollback()
+    return next(error)
+  } finally {
+    connection.release()
+  }
+}
+
 async function removeCustomerTag(req, res, next) {
   try {
     const { id, tagId } = req.params
@@ -985,6 +1193,7 @@ async function resetPhase(req, res, next) {
 module.exports = {
   addCustomerTag,
   completeBranch,
+  createIssue,
   listOverview,
   listTags,
   removeCustomerTag,

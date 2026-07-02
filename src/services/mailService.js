@@ -43,6 +43,11 @@ function uniqueEmails(emails) {
   )]
 }
 
+function getWorkflowUrl() {
+  const appUrl = String(env.mail.appUrl || '').trim().replace(/\/$/, '')
+  return appUrl.endsWith('/flow') ? appUrl : `${appUrl}/flow`
+}
+
 async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
   const mailer = getTransporter()
   const to = uniqueEmails(recipients)
@@ -52,10 +57,17 @@ async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
   }
 
   const phaseTitle = `Phase ${nextPhase.label}: ${nextPhase.name}`
-  const subject = `[OEM Workflow] New work arrived - ${phaseTitle}`
+  const stageTitle = nextPhase.stage_position ? `Stage ${nextPhase.stage_position}` : (nextPhase.stage_name || 'Stage')
+  const departmentName = Array.isArray(nextPhase.departments) && nextPhase.departments.length > 0
+    ? nextPhase.departments.join(' / ')
+    : 'ที่เกี่ยวข้อง'
+  const subject = `[P.PIYA Solution - OEM] New Task — ${customerName} | Phase ${nextPhase.label}`
   const customer = escapeHtml(customerName)
+  const department = escapeHtml(departmentName)
+  const safeStageTitle = escapeHtml(stageTitle)
   const safePhaseTitle = escapeHtml(phaseTitle)
-  const appUrl = escapeHtml(env.mail.appUrl)
+  const workflowUrl = getWorkflowUrl()
+  const appUrl = escapeHtml(workflowUrl)
 
   await mailer.sendMail({
     from: env.mail.from,
@@ -63,22 +75,92 @@ async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
     subject,
     html: `
       <div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5;color:#172033">
-        <p>New OEM work has arrived for your department.</p>
+        <p>เรียน ทีม ${department}</p>
+        <p>งานใหม่รอดำเนินการสำหรับแผนกของคุณ</p>
         <p>
-          <strong>Customer:</strong> ${customer}<br>
-          <strong>Next phase:</strong> ${safePhaseTitle}
+          <strong>Customer</strong> : ${customer}<br>
+          <strong>Stage</strong> : ${safeStageTitle}<br>
+          <strong>Phase</strong> : ${safePhaseTitle}
         </p>
         <p>
-          Please open OEM Workflow to review and continue the work:<br>
+          กดลิงก์เพื่อเปิดระบบและดำเนินการต่อ:<br>
           <a href="${appUrl}">${appUrl}</a>
         </p>
+        <p>—<br>OEM Workflow System | This email was sent automatically. Please do not reply</p>
       </div>
     `,
     text: [
-      'New OEM work has arrived for your department.',
-      `Customer: ${customerName}`,
-      `Next phase: ${phaseTitle}`,
-      `Open OEM Workflow: ${env.mail.appUrl}`,
+      'แจ้งเตือน Phase',
+      `เรียน ทีม ${departmentName}`,
+      '',
+      'งานใหม่รอดำเนินการสำหรับแผนกของคุณ',
+      '',
+      `Customer : ${customerName}`,
+      `Stage : ${stageTitle}`,
+      `Phase : ${phaseTitle}`,
+      '',
+      'กดลิงก์เพื่อเปิดระบบและดำเนินการต่อ:',
+      workflowUrl,
+      '',
+      '—',
+      'OEM Workflow System | This email was sent automatically. Please do not reply',
+    ].join('\n'),
+  })
+
+  return { skipped: false, to }
+}
+
+async function sendTicketCreatedEmail({ customerName, detail, openedByDepartment, openedByName, recipients, targetDepartment, ticketName }) {
+  const mailer = getTransporter()
+  const to = uniqueEmails(recipients)
+
+  if (!mailer || to.length === 0) {
+    return { skipped: true, to }
+  }
+
+  const subject = `[P.PIYA Solution - OEM] New Ticket — ${customerName} | ${ticketName}`
+  const customer = escapeHtml(customerName)
+  const department = escapeHtml(targetDepartment)
+  const opener = escapeHtml(openedByName)
+  const openerDepartment = escapeHtml(openedByDepartment)
+  const safeDetail = escapeHtml(detail)
+  const workflowUrl = getWorkflowUrl()
+  const appUrl = escapeHtml(workflowUrl)
+
+  await mailer.sendMail({
+    from: env.mail.from,
+    to,
+    subject,
+    html: `
+      <div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5;color:#172033">
+        <p>เรียน ทีม ${department}</p>
+        <p>มี Ticket ใหม่ส่งมาถึงแผนกของคุณ</p>
+        <p>
+          <strong>Customer</strong> : ${customer}<br>
+          <strong>Opened by</strong> : ${opener} | ${openerDepartment}<br>
+          <strong>Detai</strong>l : ${safeDetail}
+        </p>
+        <p>
+          กดลิงก์เพื่อเปิดระบบและดำเนินการต่อ:<br>
+          <a href="${appUrl}">${appUrl}</a>
+        </p>
+        <p>—<br>OEM Workflow System | This email was sent automatically. Please do not reply.</p>
+      </div>
+    `,
+    text: [
+      `เรียน ทีม ${targetDepartment}`,
+      '',
+      'มี Ticket ใหม่ส่งมาถึงแผนกของคุณ',
+      '',
+      `Customer : ${customerName}`,
+      `Opened by : ${openedByName} | ${openedByDepartment}`,
+      `Detail : ${detail}`,
+      '',
+      'กดลิงก์เพื่อเปิดระบบและดำเนินการต่อ:',
+      workflowUrl,
+      '',
+      '—',
+      'OEM Workflow System | This email was sent automatically. Please do not reply.',
     ].join('\n'),
   })
 
@@ -88,4 +170,5 @@ async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
 module.exports = {
   isMailEnabled,
   sendPhaseAdvancedEmail,
+  sendTicketCreatedEmail,
 }
