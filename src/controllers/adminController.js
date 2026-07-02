@@ -235,12 +235,29 @@ async function getPhaseNotificationContext(connection, { customerId, phaseId }) 
        workflow_phases.id,
        workflow_phases.label,
        workflow_phases.name,
+       workflow_stages.stage_position,
        workflow_stages.name AS stage_name
      FROM workflow_phases
-     INNER JOIN workflow_stages
+     INNER JOIN (
+       SELECT
+         workflow_stages.*,
+         ROW_NUMBER() OVER (PARTITION BY workflow_stages.template_id ORDER BY workflow_stages.sort_order ASC, workflow_stages.id ASC) AS stage_position
+       FROM workflow_stages
+     ) AS workflow_stages
        ON workflow_stages.id = workflow_phases.stage_id
      WHERE workflow_phases.id = ?
      LIMIT 1`,
+    [phaseId],
+  )
+
+  const [departmentRows] = await connection.execute(
+    `SELECT DISTINCT departments.name
+     FROM workflow_phase_branches
+     INNER JOIN departments
+       ON departments.id = workflow_phase_branches.department_id
+      AND departments.is_active = 1
+     WHERE workflow_phase_branches.phase_id = ?
+     ORDER BY departments.name ASC`,
     [phaseId],
   )
 
@@ -270,7 +287,10 @@ async function getPhaseNotificationContext(connection, { customerId, phaseId }) 
 
   return {
     customer: customerRows[0],
-    phase: phaseRows[0],
+    phase: {
+      ...phaseRows[0],
+      departments: departmentRows.map((row) => row.name),
+    },
     recipients: recipientRows.map((row) => row.email),
   }
 }

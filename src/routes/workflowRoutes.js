@@ -2,6 +2,7 @@ const express = require('express')
 const {
   addCustomerTag,
   completeBranch,
+  createIssue,
   listOverview,
   listTags,
   removeCustomerTag,
@@ -20,6 +21,7 @@ router.get('/tags', listTags)
 router.patch('/tags/:id', updateTag)
 router.post('/customers/:id/tags', addCustomerTag)
 router.delete('/customers/:id/tags/:tagId', removeCustomerTag)
+router.post('/customers/:id/issues', createIssue)
 router.put('/customers/:id/phases/:phaseIndex/branches/:branchIndex', saveBranchProgress)
 router.post('/customers/:id/phases/:phaseIndex/branches/:branchIndex/complete', completeBranch)
 router.post('/customers/:id/phases/:phaseIndex/reset', resetPhase)
