@@ -185,19 +185,45 @@ async function updateChecklist(connection, { branchStateId, checkedValues, markS
     throw error
   }
 
+  if (checklistRows.length === 0) return
+
+  const liveCases = []
+  const liveParams = []
+  const savedCases = []
+  const savedParams = []
+  const ids = []
+
   for (const [index, item] of checklistRows.entries()) {
     const checked = checkedValues[index] ? 1 : 0
-    await connection.execute(
-      `UPDATE customer_checklist_states
-       SET
-         live_checked = ?,
-         saved_checked = CASE WHEN ? = 1 THEN ? ELSE saved_checked END,
-         checked_by_user_id = ?,
-         checked_at = NOW()
-       WHERE id = ?`,
-      [checked, markSaved ? 1 : 0, checked, userId, item.id],
-    )
+    liveCases.push('WHEN ? THEN ?')
+    liveParams.push(item.id, checked)
+    if (markSaved) {
+      savedCases.push('WHEN ? THEN ?')
+      savedParams.push(item.id, checked)
+    }
+    ids.push(item.id)
   }
+
+  const savedCheckedSql = markSaved
+    ? `saved_checked = CASE id ${savedCases.join(' ')} ELSE saved_checked END,`
+    : ''
+  const placeholders = ids.map(() => '?').join(', ')
+
+  await connection.execute(
+    `UPDATE customer_checklist_states
+     SET
+       live_checked = CASE id ${liveCases.join(' ')} ELSE live_checked END,
+       ${savedCheckedSql}
+       checked_by_user_id = ?,
+       checked_at = NOW()
+     WHERE id IN (${placeholders})`,
+    [
+      ...liveParams,
+      ...savedParams,
+      userId,
+      ...ids,
+    ],
+  )
 }
 
 async function getPhaseNotificationContext(connection, { customerId, customerWorkflowId, phaseId }) {
@@ -239,7 +265,10 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
   )
 
   const [recipientRows] = await connection.execute(
-    `SELECT DISTINCT users.email
+    `SELECT DISTINCT
+       departments.id AS department_id,
+       departments.name AS department_name,
+       users.email
      FROM workflow_phase_branches
      INNER JOIN departments
        ON departments.id = workflow_phase_branches.department_id
@@ -256,7 +285,7 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
         )
       )
      WHERE workflow_phase_branches.phase_id = ?
-     ORDER BY users.email ASC`,
+     ORDER BY departments.name ASC, users.email ASC`,
     [phaseId],
   )
 
@@ -267,12 +296,25 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
      LIMIT 1`,
     [customerId],
   )
+  const recipientsByDepartment = recipientRows.reduce((groups, row) => {
+    const departmentId = Number(row.department_id)
+    if (!groups.has(departmentId)) {
+      groups.set(departmentId, {
+        departmentId,
+        departmentName: row.department_name,
+        recipients: [],
+      })
+    }
+    groups.get(departmentId).recipients.push(row.email)
+    return groups
+  }, new Map())
 
   return {
     customer: customerRows[0] || null,
     phase: {
       ...phaseRows[0],
       departments: departmentRows.map((row) => row.name),
+      departmentRecipients: [...recipientsByDepartment.values()],
     },
     recipients: recipientRows.map((row) => row.email),
   }
@@ -401,6 +443,29 @@ async function recordEmailNotificationResult({ actorUserId, error, notification,
     )
   } catch (logError) {
     console.warn('Failed to record email notification result:', logError.message)
+  }
+}
+
+async function sendPhaseAdvancedNotification({ actorUserId, notification }) {
+  if (!notification?.customer || !notification?.phase) return
+
+  try {
+    const result = await sendPhaseAdvancedEmail({
+      customerName: notification.customer.name,
+      nextPhase: notification.phase,
+      recipients: notification.recipients,
+    })
+    await recordEmailNotificationResult({
+      actorUserId,
+      notification,
+      result,
+    })
+  } catch (emailError) {
+    await recordEmailNotificationResult({
+      actorUserId,
+      error: emailError,
+      notification,
+    })
   }
 }
 
@@ -998,24 +1063,12 @@ async function completeBranch(req, res, next) {
     await connection.commit()
 
     if (advanceResult.notification?.customer && advanceResult.notification?.phase) {
-      try {
-        const result = await sendPhaseAdvancedEmail({
-          customerName: advanceResult.notification.customer.name,
-          nextPhase: advanceResult.notification.phase,
-          recipients: advanceResult.notification.recipients,
-        })
-        await recordEmailNotificationResult({
-          actorUserId: req.user.id,
-          notification: advanceResult.notification,
-          result,
-        })
-      } catch (emailError) {
-        await recordEmailNotificationResult({
-          actorUserId: req.user.id,
-          error: emailError,
-          notification: advanceResult.notification,
-        })
-      }
+      sendPhaseAdvancedNotification({
+        actorUserId: req.user.id,
+        notification: advanceResult.notification,
+      }).catch((emailError) => {
+        console.warn('Failed to send phase advanced notification:', emailError.message)
+      })
     }
 
     return res.json({
