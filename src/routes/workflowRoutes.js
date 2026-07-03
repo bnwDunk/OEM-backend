@@ -5,6 +5,8 @@ const {
   createIssue,
   listOverview,
   listTags,
+  markAllNotificationsRead,
+  markNotificationRead,
   removeCustomerTag,
   resetPhase,
   saveBranchProgress,
@@ -19,6 +21,8 @@ router.use(authenticate)
 router.get('/overview', listOverview)
 router.get('/tags', listTags)
 router.patch('/tags/:id', updateTag)
+router.patch('/notifications/read-all', markAllNotificationsRead)
+router.patch('/notifications/:id/read', markNotificationRead)
 router.post('/customers/:id/tags', addCustomerTag)
 router.delete('/customers/:id/tags/:tagId', removeCustomerTag)
 router.post('/customers/:id/issues', createIssue)
