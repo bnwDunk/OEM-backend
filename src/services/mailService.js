@@ -36,7 +36,7 @@ function escapeHtml(value) {
 
 function uniqueEmails(emails) {
   return [...new Set(
-    emails
+    (Array.isArray(emails) ? emails : [])
       .map((email) => String(email || '').trim().toLowerCase())
       .filter((email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
       .filter((email) => !email.endsWith('.local')),
@@ -48,9 +48,30 @@ function getWorkflowUrl() {
   return appUrl.endsWith('/flow') ? appUrl : `${appUrl}/flow`
 }
 
+function getDepartmentRecipientGroups(nextPhase, recipients) {
+  if (Array.isArray(nextPhase.departmentRecipients) && nextPhase.departmentRecipients.length > 0) {
+    return nextPhase.departmentRecipients
+      .map((group) => ({
+        departmentName: String(group.departmentName || group.department || '').trim(),
+        recipients: uniqueEmails(group.recipients),
+      }))
+      .filter((group) => group.departmentName && group.recipients.length > 0)
+  }
+
+  const departmentName = Array.isArray(nextPhase.departments) && nextPhase.departments.length > 0
+    ? nextPhase.departments.join(' / ')
+    : 'เธ—เธตเนเน€เธเธตเนเธขเธงเธเนเธญเธ'
+
+  return [{
+    departmentName,
+    recipients: uniqueEmails(recipients),
+  }].filter((group) => group.recipients.length > 0)
+}
+
 async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
   const mailer = getTransporter()
-  const to = uniqueEmails(recipients)
+  const recipientGroups = getDepartmentRecipientGroups(nextPhase, recipients)
+  const to = uniqueEmails(recipientGroups.flatMap((group) => group.recipients))
 
   if (!mailer || to.length === 0) {
     return { skipped: true, to }
@@ -69,11 +90,15 @@ async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
   const workflowUrl = getWorkflowUrl()
   const appUrl = escapeHtml(workflowUrl)
 
-  await mailer.sendMail({
-    from: env.mail.from,
-    to,
-    subject,
-    html: `
+  await Promise.all(recipientGroups.map((group) => {
+    const departmentName = group.departmentName
+    const department = escapeHtml(departmentName)
+
+    return mailer.sendMail({
+      from: env.mail.from,
+      to: group.recipients,
+      subject,
+      html: `
       <div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5;color:#172033">
         <p>เรียน ทีม ${department}</p>
         <p>งานใหม่รอดำเนินการสำหรับแผนกของคุณ</p>
@@ -88,8 +113,8 @@ async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
         </p>
         <p>—<br>OEM Workflow System | This email was sent automatically. Please do not reply</p>
       </div>
-    `,
-    text: [
+      `,
+      text: [
       'แจ้งเตือน Phase',
       `เรียน ทีม ${departmentName}`,
       '',
@@ -104,10 +129,11 @@ async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
       '',
       '—',
       'OEM Workflow System | This email was sent automatically. Please do not reply',
-    ].join('\n'),
-  })
+      ].join('\n'),
+    })
+  }))
 
-  return { skipped: false, to }
+  return { skipped: false, to, departmentCount: recipientGroups.length }
 }
 
 async function sendTicketCreatedEmail({ customerName, detail, openedByDepartment, openedByName, recipients, targetDepartment, ticketName }) {

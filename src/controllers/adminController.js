@@ -262,7 +262,10 @@ async function getPhaseNotificationContext(connection, { customerId, phaseId }) 
   )
 
   const [recipientRows] = await connection.execute(
-    `SELECT DISTINCT users.email
+    `SELECT DISTINCT
+       departments.id AS department_id,
+       departments.name AS department_name,
+       users.email
      FROM workflow_phase_branches
      INNER JOIN departments
        ON departments.id = workflow_phase_branches.department_id
@@ -279,17 +282,30 @@ async function getPhaseNotificationContext(connection, { customerId, phaseId }) 
         )
       )
      WHERE workflow_phase_branches.phase_id = ?
-     ORDER BY users.email ASC`,
+     ORDER BY departments.name ASC, users.email ASC`,
     [phaseId],
   )
 
   if (!customerRows[0] || !phaseRows[0]) return null
+  const recipientsByDepartment = recipientRows.reduce((groups, row) => {
+    const departmentId = Number(row.department_id)
+    if (!groups.has(departmentId)) {
+      groups.set(departmentId, {
+        departmentId,
+        departmentName: row.department_name,
+        recipients: [],
+      })
+    }
+    groups.get(departmentId).recipients.push(row.email)
+    return groups
+  }, new Map())
 
   return {
     customer: customerRows[0],
     phase: {
       ...phaseRows[0],
       departments: departmentRows.map((row) => row.name),
+      departmentRecipients: [...recipientsByDepartment.values()],
     },
     recipients: recipientRows.map((row) => row.email),
   }
