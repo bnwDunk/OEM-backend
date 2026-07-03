@@ -457,7 +457,7 @@ async function listOverview(req, res, next) {
     )
 
     const [notificationRows] = await pool.execute(
-      `SELECT customer_id, message, created_at
+      `SELECT id, customer_id, message, read_at, created_at
        FROM workflow_notifications
        WHERE customer_id IN (${placeholders})
        ORDER BY created_at DESC, id DESC`,
@@ -553,8 +553,10 @@ async function listOverview(req, res, next) {
             volume: formatVolume(row.volume),
           },
           notifications: (notificationsByCustomer.get(customerId) || []).map((notification) => ({
+            id: notification.id,
             text: notification.message,
             time: formatRelativeTime(notification.created_at),
+            read: Boolean(notification.read_at),
           })),
           issues: (issuesByCustomer.get(customerId) || []).map((issue) => ({
             openedBy: issue.opened_by_name,
@@ -666,6 +668,40 @@ async function updateTag(req, res, next) {
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ message: 'A tag with this name already exists.' })
     }
+    return next(error)
+  }
+}
+
+async function markNotificationRead(req, res, next) {
+  try {
+    const notificationId = Number(req.params.id)
+    if (!notificationId) return res.status(400).json({ message: 'Notification id is required.' })
+
+    const [result] = await pool.execute(
+      `UPDATE workflow_notifications
+       SET read_at = COALESCE(read_at, NOW())
+       WHERE id = ?`,
+      [notificationId],
+    )
+
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Notification not found.' })
+
+    return res.json({ read: true })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function markAllNotificationsRead(req, res, next) {
+  try {
+    await pool.execute(
+      `UPDATE workflow_notifications
+       SET read_at = COALESCE(read_at, NOW())
+       WHERE read_at IS NULL`,
+    )
+
+    return res.json({ read: true })
+  } catch (error) {
     return next(error)
   }
 }
@@ -1196,6 +1232,8 @@ module.exports = {
   createIssue,
   listOverview,
   listTags,
+  markAllNotificationsRead,
+  markNotificationRead,
   removeCustomerTag,
   resetPhase,
   saveBranchProgress,
