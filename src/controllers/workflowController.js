@@ -50,6 +50,16 @@ function normalizeColor(color) {
   return /^#[0-9A-Fa-f]{6}$/.test(value) ? value : '#0f766e'
 }
 
+function mapCustomerStatus(row) {
+  return {
+    id: row.id,
+    value: row.value,
+    label: row.label,
+    sortOrder: Number(row.sort_order || 0),
+    status: row.is_active ? 'active' : 'inactive',
+  }
+}
+
 function groupWorkflowStateRows(rows) {
   return rows.reduce((groups, row) => {
     const customerId = String(row.customer_id)
@@ -737,6 +747,20 @@ async function updateTag(req, res, next) {
   }
 }
 
+async function listCustomerStatuses(req, res, next) {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT id, value, label, sort_order, is_active
+       FROM customer_statuses
+       ORDER BY sort_order ASC, id ASC`,
+    )
+
+    return res.json({ statuses: rows.map(mapCustomerStatus) })
+  } catch (error) {
+    return next(error)
+  }
+}
+
 async function markNotificationRead(req, res, next) {
   try {
     const notificationId = Number(req.params.id)
@@ -1283,6 +1307,7 @@ module.exports = {
   addCustomerTag,
   completeBranch,
   createIssue,
+  listCustomerStatuses,
   listOverview,
   listTags,
   markAllNotificationsRead,

@@ -2,15 +2,6 @@ const bcrypt = require('bcryptjs')
 const pool = require('../config/db')
 const { sendPhaseAdvancedEmail } = require('../services/mailService')
 
-const customerStatuses = new Set([
-  'brief_spec',
-  'sampling',
-  'sample_revision',
-  'follow_up_formula',
-  'quote_negotiation',
-  'success',
-])
-
 function mapUser(row) {
   const departmentIds = row.department_ids ? String(row.department_ids).split(',') : []
   const departmentNames = row.department_names ? String(row.department_names).split('\n') : []
@@ -81,6 +72,18 @@ function mapCustomer(row) {
   }
 }
 
+function mapCustomerStatus(row) {
+  return {
+    id: row.id,
+    value: row.value,
+    label: row.label,
+    sortOrder: Number(row.sort_order || 0),
+    status: row.is_active ? 'active' : 'inactive',
+    customerCount: Number(row.customer_count || 0),
+    updatedAt: row.updated_at,
+  }
+}
+
 function mapTag(row) {
   return {
     id: row.id,
@@ -113,6 +116,28 @@ function parseTagNames(value) {
     .map((item) => item.trim())
     .filter(Boolean)
     .filter((item, index, items) => items.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index)
+}
+
+function normalizeStatusValue(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 80)
+}
+
+function makeStatusValue(label) {
+  return normalizeStatusValue(label) || `status_${Date.now()}`
+}
+
+async function customerStatusExists(connection, value) {
+  const [rows] = await connection.execute(
+    'SELECT id FROM customer_statuses WHERE value = ? AND is_active = 1 LIMIT 1',
+    [value],
+  )
+
+  return Boolean(rows[0])
 }
 
 async function replaceCustomerTags(connection, customerId, tagsText) {
@@ -999,6 +1024,157 @@ async function listCustomers(req, res, next) {
   }
 }
 
+async function listCustomerStatuses(req, res, next) {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT
+         customer_statuses.id,
+         customer_statuses.value,
+         customer_statuses.label,
+         customer_statuses.sort_order,
+         customer_statuses.is_active,
+         customer_statuses.updated_at,
+         COUNT(customers.id) AS customer_count
+       FROM customer_statuses
+       LEFT JOIN customers
+         ON customers.status = customer_statuses.value
+       GROUP BY
+         customer_statuses.id,
+         customer_statuses.value,
+         customer_statuses.label,
+         customer_statuses.sort_order,
+         customer_statuses.is_active,
+         customer_statuses.updated_at
+       ORDER BY customer_statuses.sort_order ASC, customer_statuses.id ASC`,
+    )
+
+    return res.json({ statuses: rows.map(mapCustomerStatus) })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function createCustomerStatus(req, res, next) {
+  try {
+    const label = String(req.body.label || '').trim()
+    const value = makeStatusValue(req.body.value || label)
+    const sortOrder = Number(req.body.sortOrder || 0)
+
+    if (!label) return res.status(400).json({ message: 'Status label is required.' })
+
+    const [result] = await pool.execute(
+      `INSERT INTO customer_statuses (value, label, sort_order, is_active)
+       VALUES (?, ?, ?, 1)`,
+      [value, label, sortOrder],
+    )
+
+    await logAdminAction(req, {
+      action: 'create_customer_status',
+      entityType: 'system',
+      entityId: result.insertId,
+      afterData: { label, sortOrder, value },
+    })
+
+    return res.status(201).json({ id: result.insertId, label, sortOrder, status: 'active', value })
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'A customer status with this code already exists.' })
+    }
+    return next(error)
+  }
+}
+
+async function updateCustomerStatus(req, res, next) {
+  const connection = await pool.getConnection()
+
+  try {
+    const { id } = req.params
+    const label = req.body.label === undefined ? undefined : String(req.body.label || '').trim()
+    const nextValue = req.body.value === undefined ? undefined : normalizeStatusValue(req.body.value)
+    const sortOrder = req.body.sortOrder === undefined ? undefined : Number(req.body.sortOrder || 0)
+    const status = req.body.status === undefined ? undefined : String(req.body.status || '').trim().toLowerCase()
+
+    if (label !== undefined && !label) return res.status(400).json({ message: 'Status label is required.' })
+    if (nextValue !== undefined && !nextValue) return res.status(400).json({ message: 'Status code is required.' })
+    if (status !== undefined && !['active', 'inactive'].includes(status)) {
+      return res.status(400).json({ message: 'Status must be active or inactive.' })
+    }
+
+    const [beforeRows] = await connection.execute('SELECT * FROM customer_statuses WHERE id = ? LIMIT 1', [id])
+    const before = beforeRows[0]
+    if (!before) return res.status(404).json({ message: 'Customer status not found.' })
+
+    await connection.beginTransaction()
+
+    await connection.execute(
+      `UPDATE customer_statuses
+       SET value = COALESCE(?, value),
+           label = COALESCE(?, label),
+           sort_order = COALESCE(?, sort_order),
+           is_active = COALESCE(?, is_active)
+       WHERE id = ?`,
+      [
+        nextValue ?? null,
+        label ?? null,
+        sortOrder ?? null,
+        status === undefined ? null : status === 'active' ? 1 : 0,
+        id,
+      ],
+    )
+
+    if (nextValue && nextValue !== before.value) {
+      await connection.execute('UPDATE customers SET status = ? WHERE status = ?', [nextValue, before.value])
+    }
+
+    await connection.commit()
+
+    await logAdminAction(req, {
+      action: 'update_customer_status',
+      entityType: 'system',
+      entityId: Number(id),
+      beforeData: before,
+      afterData: { label, sortOrder, status, value: nextValue },
+    })
+
+    return res.status(204).send()
+  } catch (error) {
+    await connection.rollback()
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'A customer status with this code already exists.' })
+    }
+    return next(error)
+  } finally {
+    connection.release()
+  }
+}
+
+async function deleteCustomerStatus(req, res, next) {
+  try {
+    const { id } = req.params
+    const [beforeRows] = await pool.execute('SELECT * FROM customer_statuses WHERE id = ? LIMIT 1', [id])
+    const before = beforeRows[0]
+    if (!before) return res.status(404).json({ message: 'Customer status not found.' })
+
+    const [usageRows] = await pool.execute('SELECT COUNT(*) AS count FROM customers WHERE status = ?', [before.value])
+    if (Number(usageRows[0].count) > 0) {
+      return res.status(409).json({ message: 'This status is used by customers and cannot be deleted.' })
+    }
+
+    await pool.execute('DELETE FROM customer_statuses WHERE id = ?', [id])
+
+    await logAdminAction(req, {
+      action: 'delete_customer_status',
+      entityType: 'system',
+      entityId: Number(id),
+      beforeData: before,
+    })
+
+    return res.status(204).send()
+  } catch (error) {
+    return next(error)
+  }
+}
+
 async function listTags(req, res, next) {
   try {
     const [rows] = await pool.execute(
@@ -1417,7 +1593,7 @@ async function updateCustomer(req, res, next) {
     const { id } = req.params
     const { costPackage, costSyrup, dueDate, name, price, salesperson, status, tagsText, volume } = req.body
 
-    if (status && !customerStatuses.has(status)) {
+    if (status && !(await customerStatusExists(connection, status))) {
       return res.status(400).json({ message: 'Invalid customer status.' })
     }
 
@@ -1617,19 +1793,23 @@ async function deleteFlow(req, res, next) {
 module.exports = {
   createDepartment,
   createCustomer,
+  createCustomerStatus,
   createFlow,
   createProjectWithFlow,
   createUser,
+  deleteCustomerStatus,
   deleteTag,
   deleteUser,
   deleteCustomer,
   deleteFlow,
   getFlowStructure,
   listCustomers,
+  listCustomerStatuses,
   listDepartments,
   listFlows,
   listTags,
   listUsers,
+  updateCustomerStatus,
   updateTag,
   updateCustomer,
   updateDepartment,

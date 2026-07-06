@@ -3,6 +3,7 @@ const {
   addCustomerTag,
   completeBranch,
   createIssue,
+  listCustomerStatuses,
   listOverview,
   listTags,
   markAllNotificationsRead,
@@ -19,6 +20,7 @@ const router = express.Router()
 router.use(authenticate)
 
 router.get('/overview', listOverview)
+router.get('/customer-statuses', listCustomerStatuses)
 router.get('/tags', listTags)
 router.patch('/tags/:id', updateTag)
 router.patch('/notifications/read-all', markAllNotificationsRead)
