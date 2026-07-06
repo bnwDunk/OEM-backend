@@ -2,19 +2,23 @@ const express = require('express')
 const {
   createDepartment,
   createCustomer,
+  createCustomerStatus,
   createFlow,
   createProjectWithFlow,
   createUser,
+  deleteCustomerStatus,
   deleteTag,
   deleteUser,
   deleteCustomer,
   deleteFlow,
   getFlowStructure,
   listCustomers,
+  listCustomerStatuses,
   listDepartments,
   listFlows,
   listTags,
   listUsers,
+  updateCustomerStatus,
   updateTag,
   updateCustomer,
   updateDepartment,
@@ -49,6 +53,11 @@ router.get('/customers', listCustomers)
 router.post('/customers', createCustomer)
 router.patch('/customers/:id', updateCustomer)
 router.delete('/customers/:id', deleteCustomer)
+
+router.get('/customer-statuses', listCustomerStatuses)
+router.post('/customer-statuses', createCustomerStatus)
+router.patch('/customer-statuses/:id', updateCustomerStatus)
+router.delete('/customer-statuses/:id', deleteCustomerStatus)
 
 router.get('/tags', listTags)
 router.patch('/tags/:id', updateTag)
