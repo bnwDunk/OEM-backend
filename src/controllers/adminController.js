@@ -110,6 +110,14 @@ function normalizeDueDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null
 }
 
+function normalizeNullableDecimal(value) {
+  const text = String(value ?? '').replace(/,/g, '').trim()
+  if (!text) return null
+
+  const numberValue = Number(text)
+  return Number.isFinite(numberValue) ? text : null
+}
+
 function parseTagNames(value) {
   return String(value || '')
     .split(',')
@@ -1615,19 +1623,19 @@ async function updateCustomer(req, res, next) {
     }
     if (costSyrup !== undefined) {
       updates.push('cost_syrup = ?')
-      values.push(costSyrup)
+      values.push(normalizeNullableDecimal(costSyrup))
     }
     if (costPackage !== undefined) {
       updates.push('cost_package = ?')
-      values.push(costPackage)
+      values.push(normalizeNullableDecimal(costPackage))
     }
     if (price !== undefined) {
       updates.push('price = ?')
-      values.push(price)
+      values.push(normalizeNullableDecimal(price))
     }
     if (volume !== undefined) {
       updates.push('volume = ?')
-      values.push(volume)
+      values.push(normalizeNullableDecimal(volume))
     }
     if (dueDate !== undefined) {
       updates.push('due_date = ?')
