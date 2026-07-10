@@ -3,6 +3,8 @@ const {
   addCustomerTag,
   completeBranch,
   createIssue,
+  getFlowStructure,
+  listFlows,
   listCustomerStatuses,
   listOverview,
   listTags,
@@ -11,6 +13,7 @@ const {
   removeCustomerTag,
   resetPhase,
   saveBranchProgress,
+  updateFlowBranchItems,
   updateTag,
 } = require('../controllers/workflowController')
 const authenticate = require('../middleware/authenticate')
@@ -20,6 +23,9 @@ const router = express.Router()
 router.use(authenticate)
 
 router.get('/overview', listOverview)
+router.get('/flows', listFlows)
+router.get('/flows/:id/structure', getFlowStructure)
+router.put('/flows/:flowId/phases/:phaseId/branches/:branchId/items', updateFlowBranchItems)
 router.get('/customer-statuses', listCustomerStatuses)
 router.get('/tags', listTags)
 router.patch('/tags/:id', updateTag)

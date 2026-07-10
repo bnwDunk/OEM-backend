@@ -60,12 +60,24 @@ function mapCustomerStatus(row) {
   }
 }
 
+function mapWorkflowFlow(row) {
+  return {
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    phaseCount: Number(row.phase_count || 0),
+    stageCount: Number(row.stage_count || 0),
+    status: row.status || (row.is_active ? 'active' : 'inactive'),
+  }
+}
+
 function groupWorkflowStateRows(rows) {
   return rows.reduce((groups, row) => {
     const customerId = String(row.customer_id)
     if (!groups.has(customerId)) {
       groups.set(customerId, {
         branch: [],
+        workflowBranches: [],
         singleResets: {},
       })
     }
@@ -83,10 +95,18 @@ function groupWorkflowStateRows(rows) {
         done: row.branch_status === 'done',
       }
     }
+    if (!state.workflowBranches[phaseIndex]) state.workflowBranches[phaseIndex] = []
+    if (!state.workflowBranches[phaseIndex][branchIndex]) {
+      state.workflowBranches[phaseIndex][branchIndex] = {
+        dept: row.department_name || '',
+        items: [],
+      }
+    }
 
     state.branch[phaseIndex][branchIndex].live[itemIndex] = Boolean(row.live_checked)
     state.branch[phaseIndex][branchIndex].saved[itemIndex] = Boolean(row.saved_checked)
     state.branch[phaseIndex][branchIndex].done = row.branch_status === 'done'
+    state.workflowBranches[phaseIndex][branchIndex].items[itemIndex] = row.checklist_label || `Checklist ${itemIndex + 1}`
 
     if (row.phase_status === 'reset') {
       state.singleResets[phaseIndex] = true
@@ -234,6 +254,287 @@ async function updateChecklist(connection, { branchStateId, checkedValues, markS
       ...ids,
     ],
   )
+}
+
+async function listFlows(req, res, next) {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT
+         workflow_templates.id,
+         workflow_templates.code,
+         workflow_templates.name,
+         workflow_templates.status,
+         workflow_templates.is_active,
+         COUNT(DISTINCT workflow_stages.id) AS stage_count,
+         COUNT(DISTINCT workflow_phases.id) AS phase_count
+       FROM workflow_templates
+       LEFT JOIN workflow_stages
+         ON workflow_stages.template_id = workflow_templates.id
+       LEFT JOIN workflow_phases
+         ON workflow_phases.stage_id = workflow_stages.id
+       WHERE workflow_templates.is_active = 1
+         AND workflow_templates.status = 'active'
+       GROUP BY workflow_templates.id
+       ORDER BY workflow_templates.id ASC`,
+    )
+
+    return res.json({ flows: rows.map(mapWorkflowFlow) })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function getFlowStructure(req, res, next) {
+  try {
+    const { id } = req.params
+    const [flowRows] = await pool.execute(
+      `SELECT id, code, name
+       FROM workflow_templates
+       WHERE id = ?
+         AND is_active = 1
+         AND status = 'active'
+       LIMIT 1`,
+      [id],
+    )
+
+    if (!flowRows[0]) return res.status(404).json({ message: 'Workflow not found.' })
+
+    const [stageRows] = await pool.execute(
+      `SELECT id, name, sort_order
+       FROM workflow_stages
+       WHERE template_id = ?
+       ORDER BY sort_order ASC, id ASC`,
+      [id],
+    )
+
+    const stageIds = stageRows.map((stage) => stage.id)
+    let phasesByStage = new Map()
+
+    if (stageIds.length > 0) {
+      const placeholders = stageIds.map(() => '?').join(', ')
+      const [phaseRows] = await pool.execute(
+        `SELECT id, stage_id, label, name, global_order, sort_order
+         FROM workflow_phases
+         WHERE stage_id IN (${placeholders})
+         ORDER BY global_order ASC, sort_order ASC, id ASC`,
+        stageIds,
+      )
+
+      const phaseIds = phaseRows.map((phase) => phase.id)
+      let departmentsByPhase = new Map()
+
+      if (phaseIds.length > 0) {
+        const phasePlaceholders = phaseIds.map(() => '?').join(', ')
+        const [branchRows] = await pool.execute(
+          `SELECT
+             workflow_phase_branches.phase_id,
+             workflow_phase_branches.id,
+             workflow_phase_branches.department_id,
+             departments.name AS department_name
+           FROM workflow_phase_branches
+           INNER JOIN departments
+             ON departments.id = workflow_phase_branches.department_id
+            AND departments.is_active = 1
+           WHERE workflow_phase_branches.phase_id IN (${phasePlaceholders})
+           ORDER BY workflow_phase_branches.sort_order ASC, departments.name ASC`,
+          phaseIds,
+        )
+
+        departmentsByPhase = branchRows.reduce((groups, branch) => {
+          if (!groups.has(branch.phase_id)) groups.set(branch.phase_id, [])
+          groups.get(branch.phase_id).push({
+            id: branch.department_id,
+            name: branch.department_name,
+          })
+          return groups
+        }, new Map())
+
+        const branchIds = branchRows.map((branch) => branch.id)
+        let itemsByBranch = new Map()
+
+        if (branchIds.length > 0) {
+          const branchPlaceholders = branchIds.map(() => '?').join(', ')
+          const [itemRows] = await pool.execute(
+            `SELECT id, branch_id, label, sort_order
+             FROM workflow_checklist_items
+             WHERE branch_id IN (${branchPlaceholders})
+             ORDER BY sort_order ASC, id ASC`,
+            branchIds,
+          )
+
+          itemsByBranch = itemRows.reduce((groups, item) => {
+            if (!groups.has(item.branch_id)) groups.set(item.branch_id, [])
+            groups.get(item.branch_id).push({
+              id: item.id,
+              label: item.label,
+              sortOrder: Number(item.sort_order || 0),
+            })
+            return groups
+          }, new Map())
+        }
+
+        const branchesByPhase = branchRows.reduce((groups, branch) => {
+          if (!groups.has(branch.phase_id)) groups.set(branch.phase_id, [])
+          groups.get(branch.phase_id).push({
+            id: branch.id,
+            department: {
+              id: branch.department_id,
+              name: branch.department_name,
+            },
+            departmentId: branch.department_id,
+            departmentName: branch.department_name,
+            items: itemsByBranch.get(branch.id) || [],
+          })
+          return groups
+        }, new Map())
+
+        departmentsByPhase.branchesByPhase = branchesByPhase
+      }
+
+      phasesByStage = phaseRows.reduce((groups, phase) => {
+        if (!groups.has(phase.stage_id)) groups.set(phase.stage_id, [])
+        groups.get(phase.stage_id).push({
+          id: phase.id,
+          label: phase.label,
+          name: phase.name,
+          departments: departmentsByPhase.get(phase.id) || [],
+          branches: departmentsByPhase.branchesByPhase?.get(phase.id) || [],
+        })
+        return groups
+      }, new Map())
+    }
+
+    return res.json({
+      flow: flowRows[0],
+      stages: stageRows.map((stage) => ({
+        id: stage.id,
+        name: stage.name,
+        phases: phasesByStage.get(stage.id) || [],
+      })),
+    })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function updateFlowBranchItems(req, res, next) {
+  const connection = await pool.getConnection()
+
+  try {
+    const { branchId, flowId, phaseId } = req.params
+    const items = Array.isArray(req.body.items) ? req.body.items : []
+    const departmentIds = new Set((req.user.departmentIds || []).map((departmentId) => Number(departmentId)))
+    if (req.user.departmentId) departmentIds.add(Number(req.user.departmentId))
+
+    if (departmentIds.size === 0) {
+      return res.status(403).json({ message: 'No department is assigned to this user.' })
+    }
+
+    const labels = items.map((item) => String(item.label || '').trim())
+    if (labels.some((label) => !label)) {
+      return res.status(400).json({ message: 'Work label is required.' })
+    }
+
+    const [branchRows] = await connection.execute(
+      `SELECT
+         workflow_phase_branches.id,
+         workflow_phase_branches.department_id,
+         workflow_phases.id AS phase_id,
+         workflow_stages.template_id
+       FROM workflow_phase_branches
+       INNER JOIN workflow_phases
+         ON workflow_phases.id = workflow_phase_branches.phase_id
+       INNER JOIN workflow_stages
+         ON workflow_stages.id = workflow_phases.stage_id
+       INNER JOIN workflow_templates
+         ON workflow_templates.id = workflow_stages.template_id
+        AND workflow_templates.is_active = 1
+        AND workflow_templates.status = 'active'
+       WHERE workflow_stages.template_id = ?
+         AND workflow_phases.id = ?
+         AND workflow_phase_branches.id = ?
+       LIMIT 1`,
+      [flowId, phaseId, branchId],
+    )
+
+    const branch = branchRows[0]
+    if (!branch) return res.status(404).json({ message: 'Workflow branch not found.' })
+
+    if (!departmentIds.has(Number(branch.department_id))) {
+      return res.status(403).json({ message: 'This work can only be updated by its assigned department.' })
+    }
+
+    await connection.beginTransaction()
+
+    const [existingItems] = await connection.execute(
+      'SELECT id FROM workflow_checklist_items WHERE branch_id = ? ORDER BY sort_order ASC, id ASC',
+      [branchId],
+    )
+    const requestedIds = new Set(items.map((item) => Number(item.id)).filter(Boolean))
+
+    for (const item of existingItems) {
+      if (!requestedIds.has(Number(item.id))) {
+        await connection.execute('DELETE FROM workflow_checklist_items WHERE id = ? AND branch_id = ?', [item.id, branchId])
+      }
+    }
+
+    const savedItems = []
+
+    for (const [index, item] of items.entries()) {
+      const itemId = Number(item.id) || null
+      const sortOrder = (index + 1) * 10
+      const label = String(item.label || '').trim()
+
+      if (itemId) {
+        await connection.execute(
+          `UPDATE workflow_checklist_items
+           SET label = ?, sort_order = ?, is_required = 1
+           WHERE id = ? AND branch_id = ?`,
+          [label, sortOrder, itemId, branchId],
+        )
+        savedItems.push({ id: itemId, label, sortOrder })
+      } else {
+        const [result] = await connection.execute(
+          `INSERT INTO workflow_checklist_items (branch_id, label, sort_order, is_required)
+           VALUES (?, ?, ?, 1)`,
+          [branchId, label, sortOrder],
+        )
+        const newItemId = result.insertId
+        savedItems.push({ id: newItemId, label, sortOrder })
+
+        await connection.execute(
+          `INSERT IGNORE INTO customer_checklist_states (customer_branch_state_id, checklist_item_id)
+           SELECT customer_branch_states.id, ?
+           FROM customer_branch_states
+           INNER JOIN customer_phase_states
+             ON customer_phase_states.id = customer_branch_states.customer_phase_state_id
+           INNER JOIN customer_workflows
+             ON customer_workflows.id = customer_phase_states.customer_workflow_id
+           WHERE customer_workflows.template_id = ?
+             AND customer_phase_states.phase_id = ?
+             AND customer_branch_states.branch_id = ?`,
+          [newItemId, flowId, phaseId, branchId],
+        )
+      }
+    }
+
+    await connection.execute(
+      'UPDATE workflow_templates SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [flowId],
+    )
+
+    await connection.commit()
+
+    return res.json({ items: savedItems })
+  } catch (error) {
+    await connection.rollback()
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'Work order is duplicated.' })
+    }
+    return next(error)
+  } finally {
+    connection.release()
+  }
 }
 
 async function getPhaseNotificationContext(connection, { customerId, customerWorkflowId, phaseId }) {
@@ -567,6 +868,8 @@ async function listOverview(req, res, next) {
          workflow_phases.global_order,
          customer_phase_states.status AS phase_status,
          customer_branch_states.status AS branch_status,
+         departments.name AS department_name,
+         workflow_checklist_items.label AS checklist_label,
          customer_checklist_states.live_checked,
          customer_checklist_states.saved_checked,
          DENSE_RANK() OVER (
@@ -586,6 +889,8 @@ async function listOverview(req, res, next) {
          ON customer_branch_states.customer_phase_state_id = customer_phase_states.id
        INNER JOIN workflow_phase_branches
          ON workflow_phase_branches.id = customer_branch_states.branch_id
+       INNER JOIN departments
+         ON departments.id = workflow_phase_branches.department_id
        INNER JOIN customer_checklist_states
          ON customer_checklist_states.customer_branch_state_id = customer_branch_states.id
        INNER JOIN workflow_checklist_items
@@ -644,6 +949,7 @@ async function listOverview(req, res, next) {
           })),
           ...(workflowState ? {
             branch: workflowState.branch,
+            workflowBranches: workflowState.workflowBranches,
             singleResets: workflowState.singleResets,
           } : {}),
         }
@@ -1307,6 +1613,8 @@ module.exports = {
   addCustomerTag,
   completeBranch,
   createIssue,
+  getFlowStructure,
+  listFlows,
   listCustomerStatuses,
   listOverview,
   listTags,
@@ -1315,5 +1623,6 @@ module.exports = {
   removeCustomerTag,
   resetPhase,
   saveBranchProgress,
+  updateFlowBranchItems,
   updateTag,
 }
