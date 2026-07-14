@@ -12,6 +12,7 @@ const {
   deleteCustomer,
   deleteFlow,
   getFlowStructure,
+  getCustomerCodeSettingsView,
   listCustomers,
   listCustomerStatuses,
   listDepartments,
@@ -21,6 +22,7 @@ const {
   updateCustomerStatus,
   updateTag,
   updateCustomer,
+  updateCustomerCodeSettings,
   updateDepartment,
   updateFlow,
   updateFlowStructure,
@@ -53,6 +55,8 @@ router.get('/customers', listCustomers)
 router.post('/customers', createCustomer)
 router.patch('/customers/:id', updateCustomer)
 router.delete('/customers/:id', deleteCustomer)
+router.get('/customer-code-settings', getCustomerCodeSettingsView)
+router.patch('/customer-code-settings', updateCustomerCodeSettings)
 
 router.get('/customer-statuses', listCustomerStatuses)
 router.post('/customer-statuses', createCustomerStatus)

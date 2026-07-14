@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS customer_tags (
 
 CREATE TABLE IF NOT EXISTS customers (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  customer_code VARCHAR(20) NULL DEFAULT NULL,
   slug VARCHAR(100) NOT NULL,
   name VARCHAR(190) NOT NULL,
   cost_syrup DECIMAL(12,2) NULL DEFAULT NULL,
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS customers (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
+  UNIQUE KEY customers_customer_code_unique (customer_code),
   UNIQUE KEY customers_slug_unique (slug),
   KEY customers_status_index (status),
   KEY customers_created_by_index (created_by),
