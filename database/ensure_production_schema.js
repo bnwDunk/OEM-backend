@@ -23,6 +23,65 @@ async function addColumnIfMissing(connection, tableName, columnName, definition)
   return true
 }
 
+async function indexExists(connection, tableName, indexName) {
+  const [rows] = await connection.execute(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND INDEX_NAME = ?`,
+    [tableName, indexName],
+  )
+
+  return Number(rows[0].count) > 0
+}
+
+function makeCustomerCodePrefix(value) {
+  const date = value ? new Date(value) : new Date()
+  const validDate = Number.isNaN(date.getTime()) ? new Date() : date
+  const year = String(validDate.getFullYear()).slice(-2)
+  const month = String(validDate.getMonth() + 1).padStart(2, '0')
+
+  return `OEM${year}${month}`
+}
+
+async function backfillCustomerCodes(connection) {
+  const [existingRows] = await connection.execute(
+    `SELECT customer_code
+     FROM customers
+     WHERE customer_code REGEXP '^OEM[0-9]{8}$'`,
+  )
+  const nextNumbers = new Map()
+
+  for (const row of existingRows) {
+    const code = String(row.customer_code || '')
+    const prefix = code.slice(0, 7)
+    const suffix = Number(code.slice(7))
+    if (!Number.isFinite(suffix)) continue
+    nextNumbers.set(prefix, Math.max(nextNumbers.get(prefix) || 0, suffix))
+  }
+
+  const [missingRows] = await connection.execute(
+    `SELECT id, created_at
+     FROM customers
+     WHERE customer_code IS NULL
+        OR customer_code = ''
+     ORDER BY created_at ASC, id ASC`,
+  )
+
+  for (const row of missingRows) {
+    const prefix = makeCustomerCodePrefix(row.created_at)
+    const nextNumber = (nextNumbers.get(prefix) || 0) + 1
+    nextNumbers.set(prefix, nextNumber)
+    await connection.execute(
+      'UPDATE customers SET customer_code = ? WHERE id = ?',
+      [`${prefix}${String(nextNumber).padStart(4, '0')}`, row.id],
+    )
+  }
+
+  return missingRows.length
+}
+
 async function ensureProductionSchema() {
   const connection = await mysql.createConnection({
     host: process.env.DB_HOST || 'localhost',
@@ -122,6 +181,37 @@ async function ensureProductionSchema() {
     if (await addColumnIfMissing(connection, 'customers', 'due_date', 'due_date DATE NULL DEFAULT NULL AFTER volume')) {
       changes.push('customers.due_date')
     }
+
+    if (await addColumnIfMissing(connection, 'customers', 'customer_code', 'customer_code VARCHAR(20) NULL DEFAULT NULL AFTER id')) {
+      changes.push('customers.customer_code')
+    }
+
+    const backfilledCustomerCodes = await backfillCustomerCodes(connection)
+    if (backfilledCustomerCodes) {
+      changes.push(`customers.customer_code backfilled (${backfilledCustomerCodes})`)
+    }
+
+    if (!(await indexExists(connection, 'customers', 'customers_customer_code_unique'))) {
+      await connection.query('ALTER TABLE customers ADD UNIQUE KEY customers_customer_code_unique (customer_code)')
+      changes.push('customers.customer_code unique index')
+    }
+
+    await connection.query(
+      `CREATE TABLE IF NOT EXISTS customer_code_settings (
+        id TINYINT UNSIGNED NOT NULL,
+        fixed_prefix VARCHAR(20) NOT NULL DEFAULT 'OEM',
+        date_pattern VARCHAR(20) NOT NULL DEFAULT 'YYMM',
+        suffix_length TINYINT UNSIGNED NOT NULL DEFAULT 4,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+      )`,
+    )
+
+    await connection.execute(
+      `INSERT INTO customer_code_settings (id, fixed_prefix, date_pattern, suffix_length)
+       VALUES (1, 'OEM', 'YYMM', 4)
+       ON DUPLICATE KEY UPDATE id = id`,
+    )
 
     if (await addColumnIfMissing(connection, 'customers', 'salesperson', 'salesperson VARCHAR(190) NULL DEFAULT NULL AFTER due_date')) {
       changes.push('customers.salesperson')

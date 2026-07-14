@@ -2,6 +2,12 @@ const bcrypt = require('bcryptjs')
 const pool = require('../config/db')
 const { sendPhaseAdvancedEmail } = require('../services/mailService')
 
+const defaultCustomerCodeSettings = {
+  datePattern: 'YYMM',
+  fixedPrefix: 'OEM',
+  suffixLength: 4,
+}
+
 function mapUser(row) {
   const departmentIds = row.department_ids ? String(row.department_ids).split(',') : []
   const departmentNames = row.department_names ? String(row.department_names).split('\n') : []
@@ -56,6 +62,7 @@ function mapCustomer(row) {
   return {
     id: row.id,
     slug: row.slug,
+    customerCode: row.customer_code,
     name: row.name,
     dueDate: row.due_date,
     salesperson: row.salesperson,
@@ -110,6 +117,13 @@ function normalizeDueDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null
 }
 
+function normalizeCustomerCode(value) {
+  const text = String(value || '').trim().toUpperCase()
+  if (!text) return null
+
+  return text
+}
+
 function normalizeNullableDecimal(value) {
   const text = String(value ?? '').replace(/,/g, '').trim()
   if (!text) return null
@@ -137,6 +151,90 @@ function normalizeStatusValue(value) {
 
 function makeStatusValue(label) {
   return normalizeStatusValue(label) || `status_${Date.now()}`
+}
+
+function normalizeCustomerCodeSettings(settings = {}) {
+  const fixedPrefix = String(settings.fixedPrefix || defaultCustomerCodeSettings.fixedPrefix).trim().toUpperCase()
+  const datePattern = String(settings.datePattern || defaultCustomerCodeSettings.datePattern).trim().toUpperCase()
+  const suffixLength = Number(settings.suffixLength || defaultCustomerCodeSettings.suffixLength)
+
+  if (!fixedPrefix.startsWith('OEM') || !/^[A-Z0-9]+$/.test(fixedPrefix)) {
+    const error = new Error('Customer code prefix must start with OEM and contain only A-Z or 0-9.')
+    error.statusCode = 400
+    throw error
+  }
+  if (datePattern !== 'YYMM') {
+    const error = new Error('Customer code date prefix currently supports YYMM only.')
+    error.statusCode = 400
+    throw error
+  }
+  if (!Number.isInteger(suffixLength) || suffixLength < 1 || suffixLength > 8) {
+    const error = new Error('Customer code suffix length must be between 1 and 8.')
+    error.statusCode = 400
+    throw error
+  }
+  if (fixedPrefix.length + 4 + suffixLength > 20) {
+    const error = new Error('Customer code format must be 20 characters or fewer.')
+    error.statusCode = 400
+    throw error
+  }
+
+  return { datePattern, fixedPrefix, suffixLength }
+}
+
+function mapCustomerCodeSettings(row) {
+  return normalizeCustomerCodeSettings({
+    datePattern: row?.date_pattern,
+    fixedPrefix: row?.fixed_prefix,
+    suffixLength: row?.suffix_length,
+  })
+}
+
+async function getCustomerCodeSettings(connection) {
+  const [rows] = await connection.execute(
+    `SELECT fixed_prefix, date_pattern, suffix_length
+     FROM customer_code_settings
+     WHERE id = 1
+     LIMIT 1`,
+  )
+
+  return mapCustomerCodeSettings(rows[0])
+}
+
+function makeCustomerCodePrefix(settings, date = new Date()) {
+  const year = String(date.getFullYear()).slice(-2)
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  return `${settings.fixedPrefix}${year}${month}`
+}
+
+function getCustomerCodePattern(settings) {
+  return new RegExp(`^${settings.fixedPrefix}\\d{4}\\d{${settings.suffixLength}}$`)
+}
+
+function assertCustomerCodeMatchesSettings(customerCode, settings) {
+  if (!getCustomerCodePattern(settings).test(customerCode)) {
+    const error = new Error(`Customer code must match ${settings.fixedPrefix}YYMM${'0'.repeat(settings.suffixLength)} format.`)
+    error.statusCode = 400
+    throw error
+  }
+}
+
+async function makeNextCustomerCode(connection) {
+  const settings = await getCustomerCodeSettings(connection)
+  const prefix = makeCustomerCodePrefix(settings)
+  const [rows] = await connection.execute(
+    `SELECT customer_code
+     FROM customers
+     WHERE customer_code LIKE ?
+     ORDER BY customer_code DESC
+     LIMIT 1`,
+    [`${prefix}%`],
+  )
+  const lastCode = String(rows[0]?.customer_code || '')
+  const lastNumber = lastCode.startsWith(prefix) ? Number(lastCode.slice(prefix.length)) : 0
+  const nextNumber = Number.isFinite(lastNumber) ? lastNumber + 1 : 1
+
+  return `${prefix}${String(nextNumber).padStart(settings.suffixLength, '0')}`
 }
 
 async function customerStatusExists(connection, value) {
@@ -1000,9 +1098,10 @@ async function listCustomers(req, res, next) {
   try {
     const [rows] = await pool.execute(
       `SELECT
-         customers.id,
-         customers.slug,
-         customers.name,
+       customers.id,
+       customers.slug,
+       customers.customer_code,
+       customers.name,
          customers.status,
          customers.cost_syrup,
          customers.cost_package,
@@ -1058,6 +1157,51 @@ async function listCustomerStatuses(req, res, next) {
 
     return res.json({ statuses: rows.map(mapCustomerStatus) })
   } catch (error) {
+    return next(error)
+  }
+}
+
+async function getCustomerCodeSettingsView(req, res, next) {
+  try {
+    const settings = await getCustomerCodeSettings(pool)
+    return res.json({ settings })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function updateCustomerCodeSettings(req, res, next) {
+  try {
+    const before = await getCustomerCodeSettings(pool)
+    const nextSettings = normalizeCustomerCodeSettings({
+      datePattern: req.body.datePattern ?? before.datePattern,
+      fixedPrefix: req.body.fixedPrefix ?? before.fixedPrefix,
+      suffixLength: req.body.suffixLength ?? before.suffixLength,
+    })
+
+    await pool.execute(
+      `INSERT INTO customer_code_settings (id, fixed_prefix, date_pattern, suffix_length)
+       VALUES (1, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         fixed_prefix = VALUES(fixed_prefix),
+         date_pattern = VALUES(date_pattern),
+         suffix_length = VALUES(suffix_length)`,
+      [nextSettings.fixedPrefix, nextSettings.datePattern, nextSettings.suffixLength],
+    )
+
+    await logAdminAction(req, {
+      action: 'update_customer_code_settings',
+      entityType: 'system',
+      entityId: 1,
+      beforeData: before,
+      afterData: nextSettings,
+    })
+
+    return res.json({ settings: nextSettings })
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message })
+    }
     return next(error)
   }
 }
@@ -1458,10 +1602,11 @@ async function createCustomerProjectForFlow(connection, { createdByUserId, flowI
   }
 
   const slug = await makeUniqueCustomerSlug(connection, name)
+  const customerCode = await makeNextCustomerCode(connection)
   const [customerResult] = await connection.execute(
-    `INSERT INTO customers (slug, name, status, created_by)
-     VALUES (?, ?, 'brief_spec', ?)`,
-    [slug, name, createdByUserId],
+    `INSERT INTO customers (slug, customer_code, name, status, created_by)
+     VALUES (?, ?, ?, 'brief_spec', ?)`,
+    [slug, customerCode, name, createdByUserId],
   )
 
   const [workflowResult] = await connection.execute(
@@ -1475,6 +1620,7 @@ async function createCustomerProjectForFlow(connection, { createdByUserId, flowI
   return {
     id: customerResult.insertId,
     firstPhaseId: firstPhaseRows[0].id,
+    customerCode,
     name,
     slug,
   }
@@ -1524,6 +1670,9 @@ async function createCustomer(req, res, next) {
     await connection.rollback()
     if (error.statusCode) {
       return res.status(error.statusCode).json({ message: error.message })
+    }
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'Customer code already exists.' })
     }
     return next(error)
   } finally {
@@ -1586,7 +1735,7 @@ async function createProjectWithFlow(req, res, next) {
       return res.status(error.statusCode).json({ message: error.message })
     }
     if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'A duplicate flow or project already exists.' })
+      return res.status(409).json({ message: 'A duplicate flow, project, or customer code already exists.' })
     }
     return next(error)
   } finally {
@@ -1599,7 +1748,7 @@ async function updateCustomer(req, res, next) {
 
   try {
     const { id } = req.params
-    const { costPackage, costSyrup, dueDate, name, price, salesperson, status, tagsText, volume } = req.body
+    const { costPackage, costSyrup, customerCode, dueDate, name, price, salesperson, status, tagsText, volume } = req.body
 
     if (status && !(await customerStatusExists(connection, status))) {
       return res.status(400).json({ message: 'Invalid customer status.' })
@@ -1607,6 +1756,7 @@ async function updateCustomer(req, res, next) {
 
     const [beforeRows] = await connection.execute('SELECT * FROM customers WHERE id = ? LIMIT 1', [id])
     if (!beforeRows[0]) return res.status(404).json({ message: 'Customer not found.' })
+    const customerCodeSettings = customerCode === undefined ? null : await getCustomerCodeSettings(connection)
 
     await connection.beginTransaction()
 
@@ -1620,6 +1770,12 @@ async function updateCustomer(req, res, next) {
     if (status !== undefined) {
       updates.push('status = ?')
       values.push(status)
+    }
+    if (customerCode !== undefined) {
+      const nextCustomerCode = normalizeCustomerCode(customerCode)
+      assertCustomerCodeMatchesSettings(nextCustomerCode, customerCodeSettings)
+      updates.push('customer_code = ?')
+      values.push(nextCustomerCode)
     }
     if (costSyrup !== undefined) {
       updates.push('cost_syrup = ?')
@@ -1666,12 +1822,18 @@ async function updateCustomer(req, res, next) {
       entityType: 'system',
       entityId: Number(id),
       beforeData: beforeRows[0],
-      afterData: { costPackage, costSyrup, dueDate, name, price, salesperson, status, tagsText, volume },
+      afterData: { costPackage, costSyrup, customerCode, dueDate, name, price, salesperson, status, tagsText, volume },
     })
 
     return res.status(204).send()
   } catch (error) {
     await connection.rollback()
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message })
+    }
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'Customer code already exists.' })
+    }
     return next(error)
   } finally {
     connection.release()
@@ -1810,6 +1972,7 @@ module.exports = {
   deleteUser,
   deleteCustomer,
   deleteFlow,
+  getCustomerCodeSettingsView,
   getFlowStructure,
   listCustomers,
   listCustomerStatuses,
@@ -1820,6 +1983,7 @@ module.exports = {
   updateCustomerStatus,
   updateTag,
   updateCustomer,
+  updateCustomerCodeSettings,
   updateDepartment,
   updateFlow,
   updateFlowStructure,

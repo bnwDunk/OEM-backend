@@ -786,6 +786,7 @@ async function listOverview(req, res, next) {
       `SELECT
          customers.id,
          customers.slug,
+         customers.customer_code,
          customers.name,
          customers.status,
          customers.cost_syrup,
@@ -916,6 +917,7 @@ async function listOverview(req, res, next) {
         return {
           id: row.slug || customerId,
           databaseId: row.id,
+          customerCode: row.customer_code,
           name: row.name,
           dueDate: formatDateInput(row.due_date),
           salesperson: row.salesperson || '',
