@@ -1,5 +1,6 @@
 const express = require('express')
 const {
+  createCustomer,
   updateCustomer,
 } = require('../controllers/adminController')
 const {
@@ -44,6 +45,7 @@ router.get('/tags', listTags)
 router.patch('/tags/:id', updateTag)
 router.patch('/notifications/read-all', markAllNotificationsRead)
 router.patch('/notifications/:id/read', markNotificationRead)
+router.post('/customers', createCustomer)
 router.patch('/customers/:id', restrictCustomerCodeToAdmin, updateCustomer)
 router.post('/customers/:id/tags', addCustomerTag)
 router.delete('/customers/:id/tags/:tagId', removeCustomerTag)
