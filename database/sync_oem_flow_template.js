@@ -124,10 +124,18 @@ async function syncWorkflow() {
         )
 
         const [phaseRows] = await connection.execute(
-          'SELECT id FROM workflow_phases WHERE stage_id = ? AND label = ? LIMIT 1',
-          [stageId, phase.label],
+          'SELECT id FROM workflow_phases WHERE stage_id = ? AND sort_order = ? LIMIT 1',
+          [stageId, phaseSortOrder],
         )
-        const phaseId = phaseRows[0].id
+        const phaseRow = phaseRows[0]
+
+        if (!phaseRow) {
+          throw new Error(
+            `Unable to resolve phase after upsert: stage=${stage.name}, label=${phase.label}, sortOrder=${phaseSortOrder}`,
+          )
+        }
+
+        const phaseId = phaseRow.id
 
         for (const [branchIndex, branch] of phase.branches.entries()) {
           const departmentId = await getDepartmentId(connection, branch.dept)
@@ -172,6 +180,6 @@ async function syncWorkflow() {
 }
 
 syncWorkflow().catch((error) => {
-  console.error(error.message || error)
+  console.error(error.stack || error)
   process.exit(1)
 })
