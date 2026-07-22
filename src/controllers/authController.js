@@ -134,6 +134,9 @@ async function updateMe(req, res, next) {
   try {
     const name = String(req.body.name || '').trim()
     const email = String(req.body.email || '').trim().toLowerCase()
+    const currentPassword = String(req.body.currentPassword || '')
+    const newPassword = String(req.body.newPassword || '')
+    const changingPassword = Boolean(currentPassword || newPassword)
 
     if (!name || !email) {
       return res.status(400).json({ message: 'name and email are required.' })
@@ -143,11 +146,25 @@ async function updateMe(req, res, next) {
       return res.status(400).json({ message: 'A valid email is required for notifications.' })
     }
 
+    if (changingPassword && (!currentPassword || !newPassword)) {
+      return res.status(400).json({ message: 'Current password and new password are required.' })
+    }
+
+    if (changingPassword && newPassword.length < 8) {
+      return res.status(400).json({ message: 'New password must be at least 8 characters.' })
+    }
+
+    if (changingPassword && !(await bcrypt.compare(currentPassword, req.user.passwordHash))) {
+      return res.status(400).json({ message: 'Current password is incorrect.' })
+    }
+
+    const passwordHash = changingPassword ? await bcrypt.hash(newPassword, 10) : null
+
     await pool.execute(
       `UPDATE users
-       SET name = ?, email = ?
+       SET name = ?, email = ?, password_hash = COALESCE(?, password_hash)
        WHERE id = ?`,
-      [name, email, req.user.id],
+      [name, email, passwordHash, req.user.id],
     )
 
     const user = await findUserById(req.user.id)
