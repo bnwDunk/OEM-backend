@@ -102,14 +102,6 @@ async function ensureProductionSchema() {
       ['success', 'สำเร็จ (Success)', 60],
       ['cancel', 'ยกเลิก (Cancel)', 70],
     ]
-    const demoTagNames = [
-      'น้ำเชื่อมใส',
-      'Zero Sugar',
-      'อาหารเสริม',
-      'แบ่งบรรจุ',
-      'น้ำหวานแต่งกลิ่น',
-    ]
-
     await connection.query(
       `CREATE TABLE IF NOT EXISTS user_departments (
         user_id BIGINT UNSIGNED NOT NULL,
@@ -155,27 +147,6 @@ async function ensureProductionSchema() {
 
     if (await addColumnIfMissing(connection, 'customer_tags', 'is_active', 'is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER color')) {
       changes.push('customer_tags.is_active')
-    }
-
-    const demoTagPlaceholders = demoTagNames.map(() => '?').join(', ')
-    const [demoAssignmentResult] = await connection.execute(
-      `DELETE customer_tag_assignments
-       FROM customer_tag_assignments
-       INNER JOIN customer_tags
-         ON customer_tags.id = customer_tag_assignments.tag_id
-       WHERE customer_tags.name IN (${demoTagPlaceholders})`,
-      demoTagNames,
-    )
-
-    const [demoTagResult] = await connection.execute(
-      `UPDATE customer_tags
-       SET is_active = 0
-       WHERE name IN (${demoTagPlaceholders})`,
-      demoTagNames,
-    )
-
-    if (demoAssignmentResult.affectedRows || demoTagResult.affectedRows) {
-      changes.push('removed demo customer tags')
     }
 
     if (await addColumnIfMissing(connection, 'customers', 'due_date', 'due_date DATE NULL DEFAULT NULL AFTER volume')) {
