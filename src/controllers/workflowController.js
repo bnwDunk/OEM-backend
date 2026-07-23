@@ -50,6 +50,31 @@ function normalizeColor(color) {
   return /^#[0-9A-Fa-f]{6}$/.test(value) ? value : '#0f766e'
 }
 
+const allowedCustomerFileTypes = new Set([
+  'application/pdf',
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+])
+const maxCustomerFileSize = 10 * 1024 * 1024
+
+function customerFileMatchesType(buffer, mimeType) {
+  if (mimeType === 'application/pdf') return buffer.subarray(0, 5).toString() === '%PDF-'
+  if (mimeType === 'image/jpeg') return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff
+  if (mimeType === 'image/png') return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  if (mimeType === 'image/gif') return ['GIF87a', 'GIF89a'].includes(buffer.subarray(0, 6).toString())
+  if (mimeType === 'image/webp') return buffer.subarray(0, 4).toString() === 'RIFF' && buffer.subarray(8, 12).toString() === 'WEBP'
+  return false
+}
+
+function normalizeCustomerFileName(value) {
+  return String(value || 'file')
+    .replace(/[\\/\u0000-\u001f\u007f]/g, '_')
+    .trim()
+    .slice(0, 255) || 'file'
+}
+
 function mapCustomerStatus(row) {
   return {
     id: row.id,
@@ -833,6 +858,14 @@ async function listOverview(req, res, next) {
       customerIds,
     )
 
+    const [fileRows] = await pool.execute(
+      `SELECT id, customer_id, original_name, mime_type, file_size, created_at
+       FROM customer_files
+       WHERE customer_id IN (${placeholders})
+       ORDER BY created_at DESC, id DESC`,
+      customerIds,
+    )
+
     const [notificationRows] = await pool.execute(
       `SELECT id, customer_id, message, read_at, created_at
        FROM workflow_notifications
@@ -905,6 +938,7 @@ async function listOverview(req, res, next) {
     )
 
     const tagsByCustomer = groupByCustomerId(tagRows)
+    const filesByCustomer = groupByCustomerId(fileRows)
     const notificationsByCustomer = groupByCustomerId(notificationRows)
     const issuesByCustomer = groupByCustomerId(issueRows)
     const workflowStateByCustomer = groupWorkflowStateRows(workflowStateRows)
@@ -927,6 +961,13 @@ async function listOverview(req, res, next) {
             id: tag.id,
             name: tag.name,
             color: tag.color,
+          })),
+          files: (filesByCustomer.get(customerId) || []).map((file) => ({
+            id: file.id,
+            name: file.original_name,
+            mimeType: file.mime_type,
+            size: Number(file.file_size || 0),
+            createdAt: file.created_at,
           })),
           info: {
             costSyrup: formatMoney(row.cost_syrup),
@@ -957,6 +998,85 @@ async function listOverview(req, res, next) {
         }
       }),
     })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function uploadCustomerFile(req, res, next) {
+  try {
+    const customerId = Number(req.params.id)
+    const mimeType = String(req.body.mimeType || '').trim().toLowerCase()
+    const encodedData = String(req.body.data || '').replace(/\s/g, '')
+    const name = normalizeCustomerFileName(req.body.name)
+
+    if (!customerId) return res.status(400).json({ message: 'Customer id is required.' })
+    if (!allowedCustomerFileTypes.has(mimeType)) {
+      return res.status(415).json({ message: 'Only JPG, PNG, GIF, WEBP, and PDF files are allowed.' })
+    }
+    if (!encodedData || !/^[A-Za-z0-9+/]*={0,2}$/.test(encodedData)) {
+      return res.status(400).json({ message: 'File data is invalid.' })
+    }
+
+    const fileData = Buffer.from(encodedData, 'base64')
+    if (!fileData.length) return res.status(400).json({ message: 'File is empty.' })
+    if (fileData.length > maxCustomerFileSize) {
+      return res.status(413).json({ message: 'File size must not exceed 10 MB.' })
+    }
+    if (!customerFileMatchesType(fileData, mimeType)) {
+      return res.status(415).json({ message: 'The file content does not match its image or PDF type.' })
+    }
+
+    const [customerRows] = await pool.execute('SELECT id FROM customers WHERE id = ? LIMIT 1', [customerId])
+    if (!customerRows[0]) return res.status(404).json({ message: 'Customer not found.' })
+
+    const [result] = await pool.execute(
+      `INSERT INTO customer_files
+        (customer_id, uploaded_by, original_name, mime_type, file_size, file_data)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [customerId, req.user.id || null, name, mimeType, fileData.length, fileData],
+    )
+
+    return res.status(201).json({
+      file: {
+        id: result.insertId,
+        name,
+        mimeType,
+        size: fileData.length,
+        createdAt: new Date(),
+      },
+    })
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function getCustomerFile(req, res, next) {
+  try {
+    const customerId = Number(req.params.id)
+    const fileId = Number(req.params.fileId)
+    if (!customerId || !fileId) return res.status(400).json({ message: 'Customer and file ids are required.' })
+
+    const [rows] = await pool.execute(
+      `SELECT original_name, mime_type, file_size, file_data
+       FROM customer_files
+       WHERE id = ? AND customer_id = ?
+       LIMIT 1`,
+      [fileId, customerId],
+    )
+    const file = rows[0]
+    if (!file) return res.status(404).json({ message: 'File not found.' })
+
+    const fallbackName = normalizeCustomerFileName(file.original_name).replace(/[^A-Za-z0-9._-]/g, '_')
+    const encodedName = encodeURIComponent(file.original_name)
+    res.set({
+      'Content-Type': file.mime_type,
+      'Content-Length': String(file.file_size),
+      'Content-Disposition': `inline; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`,
+      'Cache-Control': 'private, max-age=300',
+      'X-Content-Type-Options': 'nosniff',
+    })
+    return res.send(file.file_data)
   } catch (error) {
     return next(error)
   }
@@ -1616,6 +1736,7 @@ module.exports = {
   completeBranch,
   createIssue,
   getFlowStructure,
+  getCustomerFile,
   listFlows,
   listCustomerStatuses,
   listOverview,
@@ -1627,4 +1748,5 @@ module.exports = {
   saveBranchProgress,
   updateFlowBranchItems,
   updateTag,
+  uploadCustomerFile,
 }
