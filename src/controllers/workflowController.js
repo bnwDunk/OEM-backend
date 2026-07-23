@@ -875,7 +875,8 @@ async function listOverview(req, res, next) {
     )
 
     const [issueRows] = await pool.execute(
-      `SELECT
+       `SELECT
+         workflow_issues.id,
          workflow_issues.customer_id,
          workflow_issues.opened_by_name,
          workflow_issues.message,
@@ -982,6 +983,7 @@ async function listOverview(req, res, next) {
             read: Boolean(notification.read_at),
           })),
           issues: (issuesByCustomer.get(customerId) || []).map((issue) => ({
+            id: issue.id,
             openedBy: issue.opened_by_name,
             openedByDept: issue.opened_by_department,
             targetDept: issue.target_department,
@@ -1379,6 +1381,7 @@ async function createIssue(req, res, next) {
     return res.status(201).json({
       id: issueResult.insertId,
       issue: {
+        id: issueResult.insertId,
         openedBy: openedByName,
         openedByDept: openedByDepartmentName,
         targetDept: targetDepartment.name,
@@ -1388,6 +1391,76 @@ async function createIssue(req, res, next) {
         time: formatRelativeTime(new Date()),
       },
     })
+  } catch (error) {
+    await connection.rollback()
+    return next(error)
+  } finally {
+    connection.release()
+  }
+}
+
+async function closeIssue(req, res, next) {
+  const connection = await pool.getConnection()
+
+  try {
+    const customerId = Number(req.params.id)
+    const issueId = Number(req.params.issueId)
+    if (!customerId || !issueId) {
+      return res.status(400).json({ message: 'Customer and issue ids are required.' })
+    }
+
+    await connection.beginTransaction()
+    const [rows] = await connection.execute(
+      `SELECT id, customer_id, phase_id, opened_by_department_id, target_department_id, status, message
+       FROM workflow_issues
+       WHERE id = ? AND customer_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [issueId, customerId],
+    )
+    const issue = rows[0]
+    if (!issue) {
+      await connection.rollback()
+      return res.status(404).json({ message: 'Ticket not found.' })
+    }
+
+    const userDepartmentIds = new Set((req.user.departmentIds || []).map((departmentId) => Number(departmentId)))
+    if (req.user.departmentId) userDepartmentIds.add(Number(req.user.departmentId))
+    const allowedDepartmentIds = [Number(issue.opened_by_department_id), Number(issue.target_department_id)]
+    const closingDepartmentId = allowedDepartmentIds.find((departmentId) => userDepartmentIds.has(departmentId))
+
+    if (!closingDepartmentId && req.user.role !== 'admin') {
+      await connection.rollback()
+      return res.status(403).json({ message: 'Only the opening or target department can close this ticket.' })
+    }
+
+    if (issue.status !== 'closed') {
+      await connection.execute(
+        `UPDATE workflow_issues
+         SET status = 'closed',
+             closed_by_user_id = ?,
+             closed_by_department_id = ?,
+             closed_at = NOW()
+         WHERE id = ?`,
+        [req.user.id || null, closingDepartmentId || req.user.departmentId || null, issueId],
+      )
+      await connection.execute(
+        `INSERT INTO workflow_activity_logs
+          (customer_id, phase_id, actor_user_id, actor_department_id, action, message, metadata)
+         VALUES (?, ?, ?, ?, 'close_issue', ?, ?)`,
+        [
+          customerId,
+          issue.phase_id,
+          req.user.id || null,
+          closingDepartmentId || req.user.departmentId || null,
+          `Closed ticket: ${issue.message}`,
+          JSON.stringify({ issueId }),
+        ],
+      )
+    }
+
+    await connection.commit()
+    return res.json({ issue: { id: issueId, closed: true } })
   } catch (error) {
     await connection.rollback()
     return next(error)
@@ -1733,6 +1806,7 @@ async function resetPhase(req, res, next) {
 
 module.exports = {
   addCustomerTag,
+  closeIssue,
   completeBranch,
   createIssue,
   getFlowStructure,

@@ -5,6 +5,7 @@ const {
 } = require('../controllers/adminController')
 const {
   addCustomerTag,
+  closeIssue,
   completeBranch,
   createIssue,
   getFlowStructure,
@@ -54,6 +55,7 @@ router.delete('/customers/:id/tags/:tagId', removeCustomerTag)
 router.post('/customers/:id/files', uploadCustomerFile)
 router.get('/customers/:id/files/:fileId', getCustomerFile)
 router.post('/customers/:id/issues', createIssue)
+router.patch('/customers/:id/issues/:issueId/close', closeIssue)
 router.put('/customers/:id/phases/:phaseIndex/branches/:branchIndex', saveBranchProgress)
 router.post('/customers/:id/phases/:phaseIndex/branches/:branchIndex/complete', completeBranch)
 router.post('/customers/:id/phases/:phaseIndex/reset', resetPhase)
