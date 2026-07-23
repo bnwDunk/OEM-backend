@@ -149,6 +149,27 @@ async function ensureProductionSchema() {
       changes.push('customer_tags.is_active')
     }
 
+    await connection.query(
+      `CREATE TABLE IF NOT EXISTS customer_files (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        customer_id BIGINT UNSIGNED NOT NULL,
+        uploaded_by BIGINT UNSIGNED NULL DEFAULT NULL,
+        original_name VARCHAR(255) NOT NULL,
+        mime_type VARCHAR(100) NOT NULL,
+        file_size INT UNSIGNED NOT NULL,
+        file_data LONGBLOB NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY customer_files_customer_id_created_index (customer_id, created_at),
+        CONSTRAINT customer_files_customer_id_foreign
+          FOREIGN KEY (customer_id) REFERENCES customers (id)
+          ON DELETE CASCADE,
+        CONSTRAINT customer_files_uploaded_by_foreign
+          FOREIGN KEY (uploaded_by) REFERENCES users (id)
+          ON DELETE SET NULL
+      )`,
+    )
+
     if (await addColumnIfMissing(connection, 'customers', 'due_date', 'due_date DATE NULL DEFAULT NULL AFTER volume')) {
       changes.push('customers.due_date')
     }

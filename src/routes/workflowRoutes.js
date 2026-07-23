@@ -8,6 +8,7 @@ const {
   completeBranch,
   createIssue,
   getFlowStructure,
+  getCustomerFile,
   listFlows,
   listCustomerStatuses,
   listOverview,
@@ -19,6 +20,7 @@ const {
   saveBranchProgress,
   updateFlowBranchItems,
   updateTag,
+  uploadCustomerFile,
 } = require('../controllers/workflowController')
 const authenticate = require('../middleware/authenticate')
 
@@ -49,6 +51,8 @@ router.post('/customers', createCustomer)
 router.patch('/customers/:id', restrictCustomerCodeToAdmin, updateCustomer)
 router.post('/customers/:id/tags', addCustomerTag)
 router.delete('/customers/:id/tags/:tagId', removeCustomerTag)
+router.post('/customers/:id/files', uploadCustomerFile)
+router.get('/customers/:id/files/:fileId', getCustomerFile)
 router.post('/customers/:id/issues', createIssue)
 router.put('/customers/:id/phases/:phaseIndex/branches/:branchIndex', saveBranchProgress)
 router.post('/customers/:id/phases/:phaseIndex/branches/:branchIndex/complete', completeBranch)
