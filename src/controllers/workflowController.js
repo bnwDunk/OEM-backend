@@ -50,6 +50,16 @@ function normalizeColor(color) {
   return /^#[0-9A-Fa-f]{6}$/.test(value) ? value : '#0f766e'
 }
 
+function groupByIssueId(rows) {
+  return rows.reduce((groups, row) => {
+    if (!row.issue_id) return groups
+    const issueId = String(row.issue_id)
+    if (!groups.has(issueId)) groups.set(issueId, [])
+    groups.get(issueId).push(row)
+    return groups
+  }, new Map())
+}
+
 const allowedCustomerFileTypes = new Set([
   'application/pdf',
   'image/gif',
@@ -73,6 +83,42 @@ function normalizeCustomerFileName(value) {
     .replace(/[\\/\u0000-\u001f\u007f]/g, '_')
     .trim()
     .slice(0, 255) || 'file'
+}
+
+function parseCustomerFilePayload(payload) {
+  const mimeType = String(payload?.mimeType || '').trim().toLowerCase()
+  const encodedData = String(payload?.data || '').replace(/\s/g, '')
+  const name = normalizeCustomerFileName(payload?.name)
+
+  if (!allowedCustomerFileTypes.has(mimeType)) {
+    const error = new Error('Only JPG, PNG, GIF, WEBP, and PDF files are allowed.')
+    error.statusCode = 415
+    throw error
+  }
+  if (!encodedData || !/^[A-Za-z0-9+/]*={0,2}$/.test(encodedData)) {
+    const error = new Error('File data is invalid.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const fileData = Buffer.from(encodedData, 'base64')
+  if (!fileData.length) {
+    const error = new Error('File is empty.')
+    error.statusCode = 400
+    throw error
+  }
+  if (fileData.length > maxCustomerFileSize) {
+    const error = new Error('File size must not exceed 10 MB.')
+    error.statusCode = 413
+    throw error
+  }
+  if (!customerFileMatchesType(fileData, mimeType)) {
+    const error = new Error('The file content does not match its image or PDF type.')
+    error.statusCode = 415
+    throw error
+  }
+
+  return { fileData, mimeType, name }
 }
 
 function mapCustomerStatus(row) {
@@ -150,8 +196,10 @@ async function getBranchContext(connection, { branchIndex, customerId, phaseInde
        customer_phase_states.id AS customer_phase_state_id,
        customer_phase_states.status AS phase_status,
        workflow_phases.id AS phase_id,
+       workflow_phases.label AS phase_label,
        workflow_phases.name AS phase_name,
        workflow_phases.global_order,
+       workflow_stages.name AS stage_name,
        workflow_phase_branches.id AS branch_id,
        workflow_phase_branches.department_id,
        departments.name AS department_name,
@@ -626,7 +674,7 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
   )
 
   const [customerRows] = await connection.execute(
-    `SELECT id, name, slug
+    `SELECT id, customer_code, name, slug
      FROM customers
      WHERE id = ?
      LIMIT 1`,
@@ -787,9 +835,12 @@ async function sendPhaseAdvancedNotification({ actorUserId, notification }) {
 
   try {
     const result = await sendPhaseAdvancedEmail({
+      customerCode: notification.customer.customer_code,
       customerName: notification.customer.name,
+      customerReference: notification.customer.slug || notification.customer.id,
       nextPhase: notification.phase,
       recipients: notification.recipients,
+      transition: notification.transition,
     })
     await recordEmailNotificationResult({
       actorUserId,
@@ -859,7 +910,7 @@ async function listOverview(req, res, next) {
     )
 
     const [fileRows] = await pool.execute(
-      `SELECT id, customer_id, original_name, mime_type, file_size, created_at
+      `SELECT id, customer_id, issue_id, original_name, mime_type, file_size, created_at
        FROM customer_files
        WHERE customer_id IN (${placeholders})
        ORDER BY created_at DESC, id DESC`,
@@ -940,6 +991,7 @@ async function listOverview(req, res, next) {
 
     const tagsByCustomer = groupByCustomerId(tagRows)
     const filesByCustomer = groupByCustomerId(fileRows)
+    const filesByIssue = groupByIssueId(fileRows)
     const notificationsByCustomer = groupByCustomerId(notificationRows)
     const issuesByCustomer = groupByCustomerId(issueRows)
     const workflowStateByCustomer = groupWorkflowStateRows(workflowStateRows)
@@ -963,7 +1015,7 @@ async function listOverview(req, res, next) {
             name: tag.name,
             color: tag.color,
           })),
-          files: (filesByCustomer.get(customerId) || []).map((file) => ({
+          files: (filesByCustomer.get(customerId) || []).filter((file) => !file.issue_id).map((file) => ({
             id: file.id,
             name: file.original_name,
             mimeType: file.mime_type,
@@ -983,6 +1035,13 @@ async function listOverview(req, res, next) {
             read: Boolean(notification.read_at),
           })),
           issues: (issuesByCustomer.get(customerId) || []).map((issue) => ({
+            attachments: (filesByIssue.get(String(issue.id)) || []).map((file) => ({
+              id: file.id,
+              name: file.original_name,
+              mimeType: file.mime_type,
+              size: Number(file.file_size || 0),
+              createdAt: file.created_at,
+            })),
             id: issue.id,
             openedBy: issue.opened_by_name,
             openedByDept: issue.opened_by_department,
@@ -1240,17 +1299,33 @@ async function createIssue(req, res, next) {
     const openedByName = String(req.body.openedBy || req.user.name || '').trim()
     const targetDept = String(req.body.targetDept || '').trim()
     const message = String(req.body.text || req.body.message || '').trim()
+    const attachmentPayloads = Array.isArray(req.body.attachments) ? req.body.attachments : []
 
     if (!openedByName || !targetDept || !message) {
       return res.status(400).json({ message: 'openedBy, targetDept, and text are required.' })
+    }
+    if (attachmentPayloads.length > 5) {
+      return res.status(400).json({ message: 'A ticket can have at most 5 attachments.' })
+    }
+
+    let attachments
+    try {
+      attachments = attachmentPayloads.map(parseCustomerFilePayload)
+    } catch (error) {
+      return res.status(error.statusCode || 400).json({ message: error.message })
+    }
+    if (attachments.reduce((total, attachment) => total + attachment.fileData.length, 0) > maxCustomerFileSize) {
+      return res.status(413).json({ message: 'Ticket attachments must not exceed 10 MB in total.' })
     }
 
     await connection.beginTransaction()
 
     const [customerRows] = await connection.execute(
-      `SELECT
+       `SELECT
          customers.id,
+         customers.customer_code,
          customers.name,
+         customers.slug,
          customer_workflows.id AS customer_workflow_id,
          customer_workflows.template_id
        FROM customers
@@ -1302,18 +1377,33 @@ async function createIssue(req, res, next) {
     }
 
     let phaseId = null
+    let ticketPhase = null
     if (Number.isInteger(phaseIndex) && phaseIndex >= 0 && customer.template_id) {
       const [phaseRows] = await connection.execute(
-        `SELECT workflow_phases.id
+        `SELECT
+           workflow_phases.id,
+           workflow_phases.label,
+           workflow_phases.name,
+           workflow_stages.stage_position,
+           workflow_stages.name AS stage_name
          FROM workflow_phases
-         INNER JOIN workflow_stages
+         INNER JOIN (
+           SELECT
+             workflow_stages.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY workflow_stages.template_id
+               ORDER BY workflow_stages.sort_order ASC, workflow_stages.id ASC
+             ) AS stage_position
+           FROM workflow_stages
+         ) AS workflow_stages
            ON workflow_stages.id = workflow_phases.stage_id
           AND workflow_stages.template_id = ?
          WHERE workflow_phases.global_order = ?
          LIMIT 1`,
         [customer.template_id, phaseIndex + 1],
       )
-      phaseId = phaseRows[0]?.id || null
+      ticketPhase = phaseRows[0] || null
+      phaseId = ticketPhase?.id || null
     }
 
     const [issueResult] = await connection.execute(
@@ -1328,6 +1418,52 @@ async function createIssue(req, res, next) {
        )
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [customer.id, phaseId, req.user.id || null, openedByName, openedByDepartmentId, targetDepartment.id, message],
+    )
+
+    const savedAttachments = []
+    for (const attachment of attachments) {
+      const [attachmentResult] = await connection.execute(
+        `INSERT INTO customer_files
+          (customer_id, issue_id, uploaded_by, original_name, mime_type, file_size, file_data)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          customer.id,
+          issueResult.insertId,
+          req.user.id || null,
+          attachment.name,
+          attachment.mimeType,
+          attachment.fileData.length,
+          attachment.fileData,
+        ],
+      )
+      savedAttachments.push({
+        id: attachmentResult.insertId,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.fileData.length,
+        createdAt: new Date(),
+      })
+    }
+
+    const logMessage = `Opened ticket from ${openedByName} (${openedByDepartmentName}) to ${targetDepartment.name}: ${message}`
+    await connection.execute(
+      `INSERT INTO workflow_activity_logs
+        (customer_id, phase_id, actor_user_id, actor_department_id, action, message, metadata)
+       VALUES (?, ?, ?, ?, 'create_issue', ?, ?)`,
+      [
+        customer.id,
+        phaseId,
+        req.user.id || null,
+        openedByDepartmentId,
+        logMessage,
+        JSON.stringify({ attachmentCount: attachments.length, issueId: issueResult.insertId }),
+      ],
+    )
+    await connection.execute(
+      `INSERT INTO workflow_notifications
+        (customer_id, phase_id, department_id, actor_user_id, message)
+       VALUES (?, ?, ?, ?, ?)`,
+      [customer.id, phaseId, targetDepartment.id, req.user.id || null, logMessage],
     )
 
     const [recipientRows] = await connection.execute(
@@ -1351,17 +1487,25 @@ async function createIssue(req, res, next) {
 
     const notification = {
       customer,
-      phase: phaseId ? { id: phaseId, label: 'Ticket', name: getTicketName(message) } : { id: null, label: 'Ticket', name: getTicketName(message) },
+      phase: ticketPhase || { id: null, label: 'Ticket', name: getTicketName(message) },
       recipients: recipientRows.map((row) => row.email),
     }
 
     try {
       const result = await sendTicketCreatedEmail({
+        attachmentCount: savedAttachments.length,
+        attachmentNames: savedAttachments.map((attachment) => attachment.name),
+        customerCode: customer.customer_code,
         customerName: customer.name,
+        customerReference: customer.slug || customer.id,
         detail: message,
         openedByDepartment: openedByDepartmentName,
         openedByName,
+        phaseLabel: ticketPhase?.label,
+        phaseName: ticketPhase?.name,
         recipients: notification.recipients,
+        stageName: ticketPhase?.stage_name,
+        stagePosition: ticketPhase?.stage_position,
         targetDepartment: targetDepartment.name,
         ticketName: getTicketName(message),
       })
@@ -1387,12 +1531,17 @@ async function createIssue(req, res, next) {
         targetDept: targetDepartment.name,
         text: message,
         closed: false,
+        attachments: savedAttachments,
         phase: Number.isInteger(phaseIndex) ? phaseIndex : undefined,
         time: formatRelativeTime(new Date()),
       },
     })
   } catch (error) {
     await connection.rollback()
+    if (error.code === 'ER_NET_PACKET_TOO_LARGE') {
+      error.status = 413
+      error.message = 'The attachment is too large for the database connection. Please keep ticket attachments under 10 MB.'
+    }
     return next(error)
   } finally {
     connection.release()
@@ -1443,6 +1592,18 @@ async function closeIssue(req, res, next) {
              closed_at = NOW()
          WHERE id = ?`,
         [req.user.id || null, closingDepartmentId || req.user.departmentId || null, issueId],
+      )
+      await connection.execute(
+        `INSERT INTO workflow_notifications
+          (customer_id, phase_id, department_id, actor_user_id, message)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          customerId,
+          issue.phase_id,
+          Number(issue.opened_by_department_id),
+          req.user.id || null,
+          `Closed ticket by ${req.user.name || 'user'}: ${issue.message}`,
+        ],
       )
       await connection.execute(
         `INSERT INTO workflow_activity_logs
@@ -1571,6 +1732,15 @@ async function completeBranch(req, res, next) {
     )
 
     const advanceResult = await advanceWorkflowIfPhaseDone(connection, branchContext)
+    if (advanceResult.notification) {
+      advanceResult.notification.transition = {
+        completedByDepartment: branchContext.department_name,
+        completedByName: req.user.name,
+        previousPhaseLabel: branchContext.phase_label,
+        previousPhaseName: branchContext.phase_name,
+        previousStageName: branchContext.stage_name,
+      }
+    }
     const message = `ฝ่าย ${branchContext.department_name} ทำงานเสร็จแล้ว - ${branchContext.phase_name}`
 
     await connection.execute(

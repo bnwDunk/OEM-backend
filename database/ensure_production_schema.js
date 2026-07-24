@@ -36,6 +36,19 @@ async function indexExists(connection, tableName, indexName) {
   return Number(rows[0].count) > 0
 }
 
+async function constraintExists(connection, tableName, constraintName) {
+  const [rows] = await connection.execute(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.TABLE_CONSTRAINTS
+     WHERE CONSTRAINT_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND CONSTRAINT_NAME = ?`,
+    [tableName, constraintName],
+  )
+
+  return Number(rows[0].count) > 0
+}
+
 function makeCustomerCodePrefix(value) {
   const date = value ? new Date(value) : new Date()
   const validDate = Number.isNaN(date.getTime()) ? new Date() : date
@@ -153,6 +166,7 @@ async function ensureProductionSchema() {
       `CREATE TABLE IF NOT EXISTS customer_files (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         customer_id BIGINT UNSIGNED NOT NULL,
+        issue_id BIGINT UNSIGNED NULL DEFAULT NULL,
         uploaded_by BIGINT UNSIGNED NULL DEFAULT NULL,
         original_name VARCHAR(255) NOT NULL,
         mime_type VARCHAR(100) NOT NULL,
@@ -161,6 +175,7 @@ async function ensureProductionSchema() {
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         KEY customer_files_customer_id_created_index (customer_id, created_at),
+        KEY customer_files_issue_id_created_index (issue_id, created_at),
         CONSTRAINT customer_files_customer_id_foreign
           FOREIGN KEY (customer_id) REFERENCES customers (id)
           ON DELETE CASCADE,
@@ -169,6 +184,23 @@ async function ensureProductionSchema() {
           ON DELETE SET NULL
       )`,
     )
+
+    if (await addColumnIfMissing(connection, 'customer_files', 'issue_id', 'issue_id BIGINT UNSIGNED NULL DEFAULT NULL AFTER customer_id')) {
+      changes.push('customer_files.issue_id')
+    }
+    if (!(await indexExists(connection, 'customer_files', 'customer_files_issue_id_created_index'))) {
+      await connection.query('ALTER TABLE customer_files ADD KEY customer_files_issue_id_created_index (issue_id, created_at)')
+      changes.push('customer_files.issue_id index')
+    }
+    if (!(await constraintExists(connection, 'customer_files', 'customer_files_issue_id_foreign'))) {
+      await connection.query(
+        `ALTER TABLE customer_files
+         ADD CONSTRAINT customer_files_issue_id_foreign
+         FOREIGN KEY (issue_id) REFERENCES workflow_issues (id)
+         ON DELETE CASCADE`,
+      )
+      changes.push('customer_files.issue_id foreign key')
+    }
 
     if (await addColumnIfMissing(connection, 'customers', 'due_date', 'due_date DATE NULL DEFAULT NULL AFTER volume')) {
       changes.push('customers.due_date')
