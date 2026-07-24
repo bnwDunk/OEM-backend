@@ -43,9 +43,11 @@ function uniqueEmails(emails) {
   )]
 }
 
-function getWorkflowUrl() {
+function getWorkflowUrl(customerReference) {
   const appUrl = String(env.mail.appUrl || '').trim().replace(/\/$/, '')
-  return appUrl.endsWith('/flow') ? appUrl : `${appUrl}/flow`
+  const flowUrl = appUrl.endsWith('/flow') ? appUrl : `${appUrl}/flow`
+  const reference = String(customerReference || '').trim()
+  return reference ? `${flowUrl}/customers/${encodeURIComponent(reference)}` : flowUrl
 }
 
 function getDepartmentRecipientGroups(nextPhase, recipients) {
@@ -60,7 +62,7 @@ function getDepartmentRecipientGroups(nextPhase, recipients) {
 
   const departmentName = Array.isArray(nextPhase.departments) && nextPhase.departments.length > 0
     ? nextPhase.departments.join(' / ')
-    : 'เธ—เธตเนเน€เธเธตเนเธขเธงเธเนเธญเธ'
+    : 'ฝ่ายที่เกี่ยวข้อง'
 
   return [{
     departmentName,
@@ -68,7 +70,51 @@ function getDepartmentRecipientGroups(nextPhase, recipients) {
   }].filter((group) => group.recipients.length > 0)
 }
 
-async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
+function getStageTitle({ stage_name: stageName, stage_position: stagePosition } = {}) {
+  if (stagePosition && stageName) return `Stage ${stagePosition}: ${stageName}`
+  if (stageName) return `Stage: ${stageName}`
+  if (stagePosition) return `Stage ${stagePosition}`
+  return 'ไม่ระบุ Stage'
+}
+
+function getPhaseTitle({ label, name } = {}) {
+  if (label && name) return `Phase ${label}: ${name}`
+  if (name) return `Phase: ${name}`
+  if (label) return `Phase ${label}`
+  return 'ไม่ระบุ Phase'
+}
+
+function renderEmailLayout({ intro, recipientName, rows, workflowUrl }) {
+  const safeRows = rows.map(({ label, value }) => `
+    <tr>
+      <td style="width:150px;padding:8px 12px;color:#64748b;font-weight:700;vertical-align:top">${escapeHtml(label)}</td>
+      <td style="padding:8px 12px;color:#0f172a;font-weight:600;vertical-align:top;white-space:pre-wrap;word-break:break-word">${escapeHtml(value)}</td>
+    </tr>
+  `).join('')
+
+  return `
+    <div style="margin:0;background:#f1f5f9;padding:24px;font-family:Arial,sans-serif;color:#172033">
+      <div style="max-width:720px;margin:0 auto;overflow:hidden;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff">
+        <div style="background:#0f766e;padding:20px 24px;color:#ffffff">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;opacity:.85">P.PIYA Solution · OEM Workflow</div>
+          <div style="margin-top:6px;font-size:20px;font-weight:800">${escapeHtml(intro)}</div>
+        </div>
+        <div style="padding:22px 24px">
+          <p style="margin:0 0 16px;font-size:14px;line-height:1.6">เรียน ทีม ${escapeHtml(recipientName)}</p>
+          <table role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;background:#f8fafc;font-size:14px">
+            ${safeRows}
+          </table>
+          <div style="margin-top:20px">
+            <a href="${escapeHtml(workflowUrl)}" style="display:inline-block;border-radius:10px;background:#f59e0b;padding:11px 18px;color:#ffffff;font-size:14px;font-weight:800;text-decoration:none">เปิดระบบ OEM Workflow</a>
+          </div>
+          <p style="margin:22px 0 0;color:#94a3b8;font-size:12px;line-height:1.5">อีเมลนี้ส่งโดยอัตโนมัติจาก OEM Workflow System กรุณาไม่ตอบกลับอีเมลนี้</p>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+async function sendPhaseAdvancedEmail({ customerCode, customerName, customerReference, nextPhase, recipients, transition }) {
   const mailer = getTransporter()
   const recipientGroups = getDepartmentRecipientGroups(nextPhase, recipients)
   const to = uniqueEmails(recipientGroups.flatMap((group) => group.recipients))
@@ -77,58 +123,56 @@ async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
     return { skipped: true, to }
   }
 
-  const phaseTitle = `Phase ${nextPhase.label}: ${nextPhase.name}`
-  const stageTitle = nextPhase.stage_position ? `Stage ${nextPhase.stage_position}` : (nextPhase.stage_name || 'Stage')
+  const stageTitle = getStageTitle(nextPhase)
+  const phaseTitle = getPhaseTitle(nextPhase)
   const departmentName = Array.isArray(nextPhase.departments) && nextPhase.departments.length > 0
     ? nextPhase.departments.join(' / ')
-    : 'ที่เกี่ยวข้อง'
-  const subject = `[P.PIYA Solution - OEM] New Task — ${customerName} | Phase ${nextPhase.label}`
-  const customer = escapeHtml(customerName)
-  const department = escapeHtml(departmentName)
-  const safeStageTitle = escapeHtml(stageTitle)
-  const safePhaseTitle = escapeHtml(phaseTitle)
-  const workflowUrl = getWorkflowUrl()
-  const appUrl = escapeHtml(workflowUrl)
+    : 'ฝ่ายที่เกี่ยวข้อง'
+  const subject = `[P.PIYA Solution - OEM] งานใหม่ | ${customerName} | ${stageTitle} | ${phaseTitle}`
+  const workflowUrl = getWorkflowUrl(customerReference)
 
   await Promise.all(recipientGroups.map((group) => {
-    const departmentName = group.departmentName
-    const department = escapeHtml(departmentName)
+    const rows = [
+      { label: 'Customer', value: customerName },
+      ...(customerCode ? [{ label: 'Customer Code', value: customerCode }] : []),
+      { label: 'Stage', value: stageTitle },
+      { label: 'Phase', value: phaseTitle },
+      { label: 'Assigned Departments', value: departmentName },
+      ...(transition?.previousStageName ? [{
+        label: 'Previous Stage',
+        value: transition.previousStageName,
+      }] : []),
+      ...(transition?.previousPhaseName ? [{
+        label: 'Previous Phase',
+        value: getPhaseTitle({
+          label: transition.previousPhaseLabel,
+          name: transition.previousPhaseName,
+        }),
+      }] : []),
+      ...(transition?.completedByName ? [{
+        label: 'Completed By',
+        value: `${transition.completedByName} (${transition.completedByDepartment || '-'})`,
+      }] : []),
+      { label: 'Status', value: 'พร้อมดำเนินงานใน Phase นี้' },
+    ]
 
     return mailer.sendMail({
       from: env.mail.from,
       to: group.recipients,
       subject,
-      html: `
-      <div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5;color:#172033">
-        <p>เรียน ทีม ${department}</p>
-        <p>งานใหม่รอดำเนินการสำหรับแผนกของคุณ</p>
-        <p>
-          <strong>Customer</strong> : ${customer}<br>
-          <strong>Stage</strong> : ${safeStageTitle}<br>
-          <strong>Phase</strong> : ${safePhaseTitle}
-        </p>
-        <p>
-          กดลิงก์เพื่อเปิดระบบและดำเนินการต่อ:<br>
-          <a href="${appUrl}">${appUrl}</a>
-        </p>
-        <p>—<br>OEM Workflow System | This email was sent automatically. Please do not reply</p>
-      </div>
-      `,
+      html: renderEmailLayout({
+        intro: 'มีงานใหม่รอดำเนินการ',
+        recipientName: group.departmentName,
+        rows,
+        workflowUrl,
+      }),
       text: [
-      'แจ้งเตือน Phase',
-      `เรียน ทีม ${departmentName}`,
-      '',
-      'งานใหม่รอดำเนินการสำหรับแผนกของคุณ',
-      '',
-      `Customer : ${customerName}`,
-      `Stage : ${stageTitle}`,
-      `Phase : ${phaseTitle}`,
-      '',
-      'กดลิงก์เพื่อเปิดระบบและดำเนินการต่อ:',
-      workflowUrl,
-      '',
-      '—',
-      'OEM Workflow System | This email was sent automatically. Please do not reply',
+        `เรียน ทีม ${group.departmentName}`,
+        '',
+        'มีงานใหม่รอดำเนินการในระบบ OEM Workflow',
+        ...rows.map((row) => `${row.label}: ${row.value}`),
+        '',
+        `เปิดระบบ: ${workflowUrl}`,
       ].join('\n'),
     })
   }))
@@ -136,7 +180,23 @@ async function sendPhaseAdvancedEmail({ customerName, nextPhase, recipients }) {
   return { skipped: false, to, departmentCount: recipientGroups.length }
 }
 
-async function sendTicketCreatedEmail({ customerName, detail, openedByDepartment, openedByName, recipients, targetDepartment, ticketName }) {
+async function sendTicketCreatedEmail({
+  attachmentCount = 0,
+  attachmentNames = [],
+  customerCode,
+  customerName,
+  customerReference,
+  detail,
+  openedByDepartment,
+  openedByName,
+  phaseLabel,
+  phaseName,
+  recipients,
+  stageName,
+  stagePosition,
+  targetDepartment,
+  ticketName,
+}) {
   const mailer = getTransporter()
   const to = uniqueEmails(recipients)
 
@@ -144,49 +204,44 @@ async function sendTicketCreatedEmail({ customerName, detail, openedByDepartment
     return { skipped: true, to }
   }
 
-  const subject = `[P.PIYA Solution - OEM] New Ticket — ${customerName} | ${ticketName}`
-  const customer = escapeHtml(customerName)
-  const department = escapeHtml(targetDepartment)
-  const opener = escapeHtml(openedByName)
-  const openerDepartment = escapeHtml(openedByDepartment)
-  const safeDetail = escapeHtml(detail)
-  const workflowUrl = getWorkflowUrl()
-  const appUrl = escapeHtml(workflowUrl)
+  const stageTitle = getStageTitle({ stage_name: stageName, stage_position: stagePosition })
+  const phaseTitle = getPhaseTitle({ label: phaseLabel, name: phaseName })
+  const subject = `[P.PIYA Solution - OEM] Ticket ใหม่ | ${customerName} | ${stageTitle} | ${phaseTitle}`
+  const workflowUrl = getWorkflowUrl(customerReference)
+  const rows = [
+    { label: 'Ticket', value: ticketName },
+    { label: 'Customer', value: customerName },
+    ...(customerCode ? [{ label: 'Customer Code', value: customerCode }] : []),
+    { label: 'Stage', value: stageTitle },
+    { label: 'Phase', value: phaseTitle },
+    { label: 'Opened By', value: `${openedByName} (${openedByDepartment})` },
+    { label: 'Sent To', value: targetDepartment },
+    {
+      label: 'Attachments',
+      value: attachmentCount
+        ? `${attachmentCount} file(s): ${attachmentNames.join(', ')}`
+        : 'ไม่มีไฟล์แนบ',
+    },
+    { label: 'Detail', value: detail },
+  ]
 
   await mailer.sendMail({
     from: env.mail.from,
     to,
     subject,
-    html: `
-      <div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5;color:#172033">
-        <p>เรียน ทีม ${department}</p>
-        <p>มี Ticket ใหม่ส่งมาถึงแผนกของคุณ</p>
-        <p>
-          <strong>Customer</strong> : ${customer}<br>
-          <strong>Opened by</strong> : ${opener} | ${openerDepartment}<br>
-          <strong>Detai</strong>l : ${safeDetail}
-        </p>
-        <p>
-          กดลิงก์เพื่อเปิดระบบและดำเนินการต่อ:<br>
-          <a href="${appUrl}">${appUrl}</a>
-        </p>
-        <p>—<br>OEM Workflow System | This email was sent automatically. Please do not reply.</p>
-      </div>
-    `,
+    html: renderEmailLayout({
+      intro: 'มี Ticket ใหม่ส่งถึงฝ่ายของคุณ',
+      recipientName: targetDepartment,
+      rows,
+      workflowUrl,
+    }),
     text: [
       `เรียน ทีม ${targetDepartment}`,
       '',
-      'มี Ticket ใหม่ส่งมาถึงแผนกของคุณ',
+      'มี Ticket ใหม่ส่งถึงฝ่ายของคุณ',
+      ...rows.map((row) => `${row.label}: ${row.value}`),
       '',
-      `Customer : ${customerName}`,
-      `Opened by : ${openedByName} | ${openedByDepartment}`,
-      `Detail : ${detail}`,
-      '',
-      'กดลิงก์เพื่อเปิดระบบและดำเนินการต่อ:',
-      workflowUrl,
-      '',
-      '—',
-      'OEM Workflow System | This email was sent automatically. Please do not reply.',
+      `เปิดระบบ: ${workflowUrl}`,
     ].join('\n'),
   })
 
