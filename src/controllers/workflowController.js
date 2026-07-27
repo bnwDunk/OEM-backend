@@ -1143,6 +1143,193 @@ async function getCustomerFile(req, res, next) {
   }
 }
 
+async function createDepartmentPhase(req, res, next) {
+  const connection = await pool.getConnection()
+
+  try {
+    const flowId = Number(req.params.flowId)
+    const stageId = Number(req.params.stageId)
+    const label = String(req.body.label || '').trim()
+    const name = String(req.body.name || '').trim()
+    const requestedDepartmentName = String(req.body.departmentName || '').trim().toLowerCase()
+    const assignedDepartments = Array.isArray(req.user.departments) ? req.user.departments : []
+    const department = requestedDepartmentName
+      ? assignedDepartments.find((item) => String(item.name || '').trim().toLowerCase() === requestedDepartmentName)
+      : assignedDepartments[0]
+
+    if (!flowId || !stageId) {
+      return res.status(400).json({ message: 'Flow and stage ids are required.' })
+    }
+    if (!label || !name) {
+      return res.status(400).json({ message: 'Phase label and name are required.' })
+    }
+    if (label.length > 20 || name.length > 190) {
+      return res.status(400).json({ message: 'Phase label or name is too long.' })
+    }
+    if (!department?.id) {
+      return res.status(403).json({ message: 'The new phase must use one of your assigned departments.' })
+    }
+
+    await connection.beginTransaction()
+
+    const [stageRows] = await connection.execute(
+      `SELECT workflow_stages.id, workflow_stages.sort_order
+       FROM workflow_stages
+       INNER JOIN workflow_templates
+         ON workflow_templates.id = workflow_stages.template_id
+        AND workflow_templates.is_active = 1
+        AND workflow_templates.status = 'active'
+       WHERE workflow_stages.id = ?
+         AND workflow_stages.template_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [stageId, flowId],
+    )
+    const stage = stageRows[0]
+    if (!stage) {
+      await connection.rollback()
+      return res.status(404).json({ message: 'Workflow stage not found.' })
+    }
+
+    const [duplicateRows] = await connection.execute(
+      `SELECT id
+       FROM workflow_phases
+       WHERE stage_id = ?
+         AND LOWER(label) = LOWER(?)
+       LIMIT 1`,
+      [stageId, label],
+    )
+    if (duplicateRows[0]) {
+      await connection.rollback()
+      return res.status(409).json({ message: 'This phase label already exists in the selected stage.' })
+    }
+
+    const [positionRows] = await connection.execute(
+      `SELECT
+         COALESCE(MAX(CASE WHEN workflow_stages.id = ? THEN workflow_phases.sort_order END), 0) AS stage_sort_order,
+         COALESCE(MAX(workflow_phases.global_order), 0) AS previous_global_order
+       FROM workflow_stages
+       LEFT JOIN workflow_phases
+         ON workflow_phases.stage_id = workflow_stages.id
+       WHERE workflow_stages.template_id = ?
+         AND (
+           workflow_stages.sort_order < ?
+           OR workflow_stages.id = ?
+         )`,
+      [stageId, flowId, stage.sort_order, stageId],
+    )
+    const phaseSortOrder = Number(positionRows[0]?.stage_sort_order || 0) + 10
+    const globalOrder = Number(positionRows[0]?.previous_global_order || 0) + 1
+
+    await connection.execute(
+      `UPDATE workflow_phases
+       INNER JOIN workflow_stages
+         ON workflow_stages.id = workflow_phases.stage_id
+       SET workflow_phases.global_order = workflow_phases.global_order + 1
+       WHERE workflow_stages.template_id = ?
+         AND workflow_phases.global_order >= ?`,
+      [flowId, globalOrder],
+    )
+
+    const [phaseResult] = await connection.execute(
+      `INSERT INTO workflow_phases (stage_id, label, name, global_order, sort_order)
+       VALUES (?, ?, ?, ?, ?)`,
+      [stageId, label, name, globalOrder, phaseSortOrder],
+    )
+    const phaseId = phaseResult.insertId
+
+    const [branchResult] = await connection.execute(
+      `INSERT INTO workflow_phase_branches (phase_id, department_id, sort_order)
+       VALUES (?, ?, 10)`,
+      [phaseId, department.id],
+    )
+    const branchId = branchResult.insertId
+
+    const [itemResult] = await connection.execute(
+      `INSERT INTO workflow_checklist_items (branch_id, label, sort_order, is_required)
+       VALUES (?, ?, 10, 1)`,
+      [branchId, name],
+    )
+
+    const [workflowRows] = await connection.execute(
+      `SELECT
+         customer_workflows.id,
+         current_phases.global_order AS current_phase_order
+       FROM customer_workflows
+       LEFT JOIN workflow_phases AS current_phases
+         ON current_phases.id = customer_workflows.current_phase_id
+       WHERE customer_workflows.template_id = ?
+         AND customer_workflows.status = 'active'
+       FOR UPDATE`,
+      [flowId],
+    )
+
+    let activatedExistingCustomers = 0
+    for (const workflow of workflowRows) {
+      const activateAsInsertedWork = Number(workflow.current_phase_order || 0) >= globalOrder
+      if (activateAsInsertedWork) activatedExistingCustomers += 1
+      const [phaseStateResult] = await connection.execute(
+        `INSERT INTO customer_phase_states
+          (customer_workflow_id, phase_id, status, reset_mode, reset_by_department_id, reset_by_user_id, reset_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          workflow.id,
+          phaseId,
+          activateAsInsertedWork ? 'reset' : 'locked',
+          activateAsInsertedWork ? 'single' : null,
+          activateAsInsertedWork ? department.id : null,
+          activateAsInsertedWork ? req.user.id : null,
+          activateAsInsertedWork ? new Date() : null,
+        ],
+      )
+      const [branchStateResult] = await connection.execute(
+        `INSERT INTO customer_branch_states (customer_phase_state_id, branch_id, status)
+         VALUES (?, ?, ?)`,
+        [phaseStateResult.insertId, branchId, activateAsInsertedWork ? 'active' : 'waiting'],
+      )
+      await connection.execute(
+        `INSERT INTO customer_checklist_states
+          (customer_branch_state_id, checklist_item_id, live_checked, saved_checked)
+         VALUES (?, ?, 0, 0)`,
+        [branchStateResult.insertId, itemResult.insertId],
+      )
+    }
+
+    await connection.execute(
+      'UPDATE workflow_templates SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [flowId],
+    )
+    await connection.commit()
+
+    return res.status(201).json({
+      activatedExistingCustomers,
+      affectedActiveCustomers: workflowRows.length,
+      phase: {
+        id: phaseId,
+        label,
+        name,
+        branch: {
+          id: branchId,
+          departmentId: department.id,
+          departmentName: department.name,
+          item: {
+            id: itemResult.insertId,
+            label: name,
+          },
+        },
+      },
+    })
+  } catch (error) {
+    await connection.rollback()
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'The phase label or order is duplicated.' })
+    }
+    return next(error)
+  } finally {
+    connection.release()
+  }
+}
+
 async function listTags(req, res, next) {
   try {
     const [rows] = await pool.execute(
@@ -1978,6 +2165,7 @@ module.exports = {
   addCustomerTag,
   closeIssue,
   completeBranch,
+  createDepartmentPhase,
   createIssue,
   getFlowStructure,
   getCustomerFile,
