@@ -6,22 +6,25 @@ function mapUser(row) {
   const departmentIds = row.department_ids ? String(row.department_ids).split(',') : []
   const departmentCodes = row.department_codes ? String(row.department_codes).split('\n') : []
   const departmentNames = row.department_names ? String(row.department_names).split('\n') : []
-  const assignedDepartments = departmentIds
+  const mappedDepartments = departmentIds
     .map((id, index) => ({
       id: Number(id),
       code: departmentCodes[index],
       name: departmentNames[index],
     }))
     .filter((department) => department.id && department.name)
-  const primaryDepartment = assignedDepartments[0] || (
-    row.department_id
-      ? {
-          id: row.department_id,
-          code: row.department_code,
-          name: row.department_name,
-        }
-      : null
-  )
+  const storedPrimaryDepartment = row.department_id
+    ? {
+        id: Number(row.department_id),
+        code: row.department_code,
+        name: row.department_name,
+      }
+    : null
+  const assignedDepartments = storedPrimaryDepartment?.name
+    && !mappedDepartments.some((department) => department.id === storedPrimaryDepartment.id)
+    ? [storedPrimaryDepartment, ...mappedDepartments]
+    : mappedDepartments
+  const primaryDepartment = storedPrimaryDepartment || assignedDepartments[0] || null
 
   return {
     id: row.id,

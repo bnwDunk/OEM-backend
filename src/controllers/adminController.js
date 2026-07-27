@@ -562,6 +562,10 @@ async function createUser(req, res, next) {
       : departmentId ? [Number(departmentId)] : []
     const primaryDepartmentId = selectedDepartmentIds[0] || null
 
+    if (normalizedRole !== 'admin' && selectedDepartmentIds.length === 0) {
+      return res.status(400).json({ message: 'At least one department is required for this user.' })
+    }
+
     await connection.beginTransaction()
 
     const [result] = await connection.execute(
@@ -613,22 +617,42 @@ async function updateUser(req, res, next) {
     if (normalizedEmail !== null && !isValidEmail(normalizedEmail)) {
       return res.status(400).json({ message: 'A valid email is required for notifications.' })
     }
+    const departmentSelectionProvided = Array.isArray(departmentIds)
+      || Object.prototype.hasOwnProperty.call(req.body || {}, 'departmentId')
     const selectedDepartmentIds = Array.isArray(departmentIds)
       ? departmentIds.map((item) => Number(item)).filter(Boolean)
-      : departmentId ? [Number(departmentId)] : null
-    const primaryDepartmentId = selectedDepartmentIds ? selectedDepartmentIds[0] || null : departmentId ?? null
+      : departmentId ? [Number(departmentId)] : departmentSelectionProvided ? [] : null
+    const primaryDepartmentId = selectedDepartmentIds ? selectedDepartmentIds[0] || null : null
+    const effectiveRole = normalizedRole || String(beforeRows[0].role || 'user').trim().toLowerCase()
+
+    if (effectiveRole !== 'admin') {
+      if (selectedDepartmentIds && selectedDepartmentIds.length === 0) {
+        return res.status(400).json({ message: 'At least one department is required for this user.' })
+      }
+
+      if (!selectedDepartmentIds && !beforeRows[0].department_id) {
+        const [assignedRows] = await connection.execute(
+          'SELECT 1 FROM user_departments WHERE user_id = ? LIMIT 1',
+          [id],
+        )
+        if (!assignedRows[0]) {
+          return res.status(400).json({ message: 'At least one department is required for this user.' })
+        }
+      }
+    }
 
     await connection.beginTransaction()
 
     await connection.execute(
       `UPDATE users
-       SET department_id = COALESCE(?, department_id),
+       SET department_id = CASE WHEN ? = 1 THEN ? ELSE department_id END,
            email = COALESCE(?, email),
            name = COALESCE(?, name),
            role = COALESCE(?, role),
            is_active = COALESCE(?, is_active)
        WHERE id = ?`,
       [
+        departmentSelectionProvided ? 1 : 0,
         primaryDepartmentId,
         normalizedEmail,
         name ?? null,

@@ -7,6 +7,7 @@ const {
   addCustomerTag,
   closeIssue,
   completeBranch,
+  createDepartmentPhase,
   createIssue,
   getFlowStructure,
   getCustomerFile,
@@ -42,6 +43,7 @@ function restrictCustomerCodeToAdmin(req, res, next) {
 router.get('/overview', listOverview)
 router.get('/flows', listFlows)
 router.get('/flows/:id/structure', getFlowStructure)
+router.post('/flows/:flowId/stages/:stageId/phases', createDepartmentPhase)
 router.put('/flows/:flowId/phases/:phaseId/branches/:branchId/items', updateFlowBranchItems)
 router.get('/customer-statuses', listCustomerStatuses)
 router.get('/tags', listTags)
