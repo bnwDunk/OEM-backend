@@ -373,7 +373,7 @@ async function getFlowStructure(req, res, next) {
     if (!flowRows[0]) return res.status(404).json({ message: 'Workflow not found.' })
 
     const [stageRows] = await pool.execute(
-      `SELECT id, name, sort_order
+      `SELECT id, name, due_days, sort_order
        FROM workflow_stages
        WHERE template_id = ?
        ORDER BY sort_order ASC, id ASC`,
@@ -480,6 +480,7 @@ async function getFlowStructure(req, res, next) {
     return res.json({
       flow: flowRows[0],
       stages: stageRows.map((stage) => ({
+        dueDays: stage.due_days === null ? null : Number(stage.due_days),
         id: stage.id,
         name: stage.name,
         phases: phasesByStage.get(stage.id) || [],

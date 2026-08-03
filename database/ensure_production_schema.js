@@ -154,6 +154,10 @@ async function ensureProductionSchema() {
          AND users.department_id IS NOT NULL`,
     )
 
+    if (await addColumnIfMissing(connection, 'workflow_stages', 'due_days', 'due_days INT UNSIGNED NULL DEFAULT NULL AFTER name')) {
+      changes.push('workflow_stages.due_days')
+    }
+
     if (await addColumnIfMissing(connection, 'customer_tags', 'color', 'color VARCHAR(30) NULL DEFAULT NULL AFTER name')) {
       changes.push('customer_tags.color')
     }
