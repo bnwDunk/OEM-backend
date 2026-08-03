@@ -21,6 +21,7 @@ const {
   resetPhase,
   saveBranchProgress,
   updateFlowBranchItems,
+  updateFlowOrder,
   updateTag,
   uploadCustomerFile,
 } = require('../controllers/workflowController')
@@ -43,6 +44,7 @@ function restrictCustomerCodeToAdmin(req, res, next) {
 router.get('/overview', listOverview)
 router.get('/flows', listFlows)
 router.get('/flows/:id/structure', getFlowStructure)
+router.put('/flows/:flowId/order', updateFlowOrder)
 router.post('/flows/:flowId/stages/:stageId/phases', createDepartmentPhase)
 router.put('/flows/:flowId/phases/:phaseId/branches/:branchId/items', updateFlowBranchItems)
 router.get('/customer-statuses', listCustomerStatuses)
