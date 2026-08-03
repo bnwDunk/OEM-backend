@@ -2161,6 +2161,99 @@ async function resetPhase(req, res, next) {
   }
 }
 
+async function updateFlowOrder(req, res, next) {
+  const connection = await pool.getConnection()
+
+  try {
+    const flowId = Number(req.params.flowId)
+    const stages = Array.isArray(req.body.stages) ? req.body.stages : []
+    const requestedStages = stages.map((stage) => ({
+      id: Number(stage.id),
+      phaseIds: Array.isArray(stage.phaseIds) ? stage.phaseIds.map(Number) : [],
+    }))
+
+    if (!flowId || requestedStages.length === 0 || requestedStages.some((stage) => !stage.id || stage.phaseIds.some((id) => !id))) {
+      return res.status(400).json({ message: 'A complete stage and phase order is required.' })
+    }
+
+    const requestedStageIds = requestedStages.map((stage) => stage.id)
+    const requestedPhaseIds = requestedStages.flatMap((stage) => stage.phaseIds)
+    if (new Set(requestedStageIds).size !== requestedStageIds.length || new Set(requestedPhaseIds).size !== requestedPhaseIds.length) {
+      return res.status(400).json({ message: 'Stage and phase ids must be unique.' })
+    }
+
+    await connection.beginTransaction()
+
+    const [stageRows] = await connection.execute(
+      'SELECT id FROM workflow_stages WHERE template_id = ? FOR UPDATE',
+      [flowId],
+    )
+    const storedStageIds = new Set(stageRows.map((stage) => Number(stage.id)))
+    if (storedStageIds.size !== requestedStageIds.length || requestedStageIds.some((id) => !storedStageIds.has(id))) {
+      await connection.rollback()
+      return res.status(400).json({ message: 'The submitted stage order is incomplete.' })
+    }
+
+    const [phaseRows] = await connection.execute(
+      `SELECT workflow_phases.id, workflow_phases.stage_id
+       FROM workflow_phases
+       INNER JOIN workflow_stages ON workflow_stages.id = workflow_phases.stage_id
+       WHERE workflow_stages.template_id = ?
+       FOR UPDATE`,
+      [flowId],
+    )
+    const storedPhases = new Map(phaseRows.map((phase) => [Number(phase.id), Number(phase.stage_id)]))
+    const phaseOrderIsValid = storedPhases.size === requestedPhaseIds.length
+      && requestedStages.every((stage) => stage.phaseIds.every((phaseId) => storedPhases.get(phaseId) === stage.id))
+    if (!phaseOrderIsValid) {
+      await connection.rollback()
+      return res.status(400).json({ message: 'The submitted phase order is incomplete or invalid.' })
+    }
+
+    for (const [stageIndex, stage] of requestedStages.entries()) {
+      await connection.execute(
+        'UPDATE workflow_stages SET sort_order = ? WHERE id = ? AND template_id = ?',
+        [1000000 + stageIndex, stage.id, flowId],
+      )
+    }
+
+    let temporaryPhaseOrder = 1
+    for (const stage of requestedStages) {
+      for (const phaseId of stage.phaseIds) {
+        await connection.execute(
+          'UPDATE workflow_phases SET global_order = ?, sort_order = ? WHERE id = ? AND stage_id = ?',
+          [1000000 + temporaryPhaseOrder, 1000000 + temporaryPhaseOrder, phaseId, stage.id],
+        )
+        temporaryPhaseOrder += 1
+      }
+    }
+
+    let globalOrder = 1
+    for (const [stageIndex, stage] of requestedStages.entries()) {
+      await connection.execute(
+        'UPDATE workflow_stages SET sort_order = ? WHERE id = ? AND template_id = ?',
+        [(stageIndex + 1) * 10, stage.id, flowId],
+      )
+      for (const [phaseIndex, phaseId] of stage.phaseIds.entries()) {
+        await connection.execute(
+          'UPDATE workflow_phases SET global_order = ?, sort_order = ? WHERE id = ? AND stage_id = ?',
+          [globalOrder, (phaseIndex + 1) * 10, phaseId, stage.id],
+        )
+        globalOrder += 1
+      }
+    }
+
+    await connection.execute('UPDATE workflow_templates SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [flowId])
+    await connection.commit()
+    return res.json({ reordered: true })
+  } catch (error) {
+    await connection.rollback()
+    return next(error)
+  } finally {
+    connection.release()
+  }
+}
+
 module.exports = {
   addCustomerTag,
   closeIssue,
@@ -2179,6 +2272,7 @@ module.exports = {
   resetPhase,
   saveBranchProgress,
   updateFlowBranchItems,
+  updateFlowOrder,
   updateTag,
   uploadCustomerFile,
 }
