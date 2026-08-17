@@ -96,20 +96,20 @@ async function syncWorkflow() {
     const templateId = await getTemplateId(connection)
     let globalOrder = 1
 
-    for (const [stageIndex, stage] of stages.entries()) {
-      const stageSortOrder = (stageIndex + 1) * 10
-      await connection.execute(
-        `INSERT INTO workflow_stages (template_id, name, sort_order)
-         VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE name = VALUES(name)`,
-        [templateId, stage.name, stageSortOrder],
-      )
-
+    for (const stage of stages) {
       const [stageRows] = await connection.execute(
-        'SELECT id FROM workflow_stages WHERE template_id = ? AND sort_order = ? LIMIT 1',
-        [templateId, stageSortOrder],
+        'SELECT id FROM workflow_stages WHERE template_id = ? AND name = ? ORDER BY id ASC LIMIT 1',
+        [templateId, stage.name],
       )
-      const stageId = stageRows[0].id
+      let stageId = stageRows[0]?.id
+
+      if (!stageId) {
+        const [stageResult] = await connection.execute(
+          'INSERT INTO workflow_stages (template_id, name) VALUES (?, ?)',
+          [templateId, stage.name],
+        )
+        stageId = stageResult.insertId
+      }
 
       for (const [phaseIndex, phase] of stage.stops.entries()) {
         const phaseSortOrder = (phaseIndex + 1) * 10

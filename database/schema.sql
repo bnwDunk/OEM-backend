@@ -198,12 +198,10 @@ CREATE TABLE IF NOT EXISTS workflow_stages (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   template_id BIGINT UNSIGNED NOT NULL,
   name VARCHAR(190) NOT NULL,
-  due_days INT UNSIGNED NULL DEFAULT NULL,
-  sort_order INT UNSIGNED NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY workflow_stages_template_sort_unique (template_id, sort_order),
+  KEY workflow_stages_template_id_index (template_id),
   CONSTRAINT workflow_stages_template_id_foreign
     FOREIGN KEY (template_id) REFERENCES workflow_templates (id)
     ON DELETE CASCADE
