@@ -9,6 +9,7 @@ const {
   completeBranch,
   createDepartmentPhase,
   createIssue,
+  deleteCustomerFile,
   getFlowStructure,
   getCustomerFile,
   listFlows,
@@ -26,11 +27,12 @@ const {
   uploadCustomerFile,
 } = require('../controllers/workflowController')
 const authenticate = require('../middleware/authenticate')
+const changeEmailNotification = require('../middleware/changeEmailNotification')
 const requireWebAdmin = require('../middleware/requireWebAdmin')
 
 const router = express.Router()
 
-router.use(authenticate)
+router.use(authenticate, changeEmailNotification)
 
 function restrictCustomerCodeToAdmin(req, res, next) {
   const role = String(req.user?.role || '').trim().toLowerCase()
@@ -59,6 +61,7 @@ router.post('/customers/:id/tags', addCustomerTag)
 router.delete('/customers/:id/tags/:tagId', removeCustomerTag)
 router.post('/customers/:id/files', uploadCustomerFile)
 router.get('/customers/:id/files/:fileId', getCustomerFile)
+router.delete('/customers/:id/files/:fileId', deleteCustomerFile)
 router.post('/customers/:id/issues', createIssue)
 router.patch('/customers/:id/issues/:issueId/close', closeIssue)
 router.put('/customers/:id/phases/:phaseIndex/branches/:branchIndex', saveBranchProgress)
