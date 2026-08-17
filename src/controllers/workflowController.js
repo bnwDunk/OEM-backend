@@ -870,7 +870,7 @@ async function listOverview(req, res, next) {
          customers.cost_package,
          customers.price,
          customers.volume,
-         customers.due_date,
+         COALESCE(current_stage_due_dates.due_date, customers.due_date) AS due_date,
          customers.salesperson,
          COALESCE(current_phase.global_order, first_phase.global_order, 0) AS current_phase_order
        FROM customers
@@ -879,6 +879,9 @@ async function listOverview(req, res, next) {
         AND customer_workflows.status = 'active'
        LEFT JOIN workflow_phases AS current_phase
          ON current_phase.id = customer_workflows.current_phase_id
+       LEFT JOIN customer_stage_due_dates AS current_stage_due_dates
+         ON current_stage_due_dates.customer_workflow_id = customer_workflows.id
+        AND current_stage_due_dates.stage_id = current_phase.stage_id
        LEFT JOIN (
          SELECT workflow_stages.template_id, MIN(workflow_phases.global_order) AS global_order
          FROM workflow_stages
@@ -895,6 +898,23 @@ async function listOverview(req, res, next) {
     }
 
     const placeholders = customerIds.map(() => '?').join(', ')
+    const [stageDueDateRows] = await pool.execute(
+      `SELECT
+         customer_workflows.customer_id,
+         workflow_stages.id AS stage_id,
+         workflow_stages.name AS stage_name,
+         customer_stage_due_dates.due_date
+       FROM customer_workflows
+       INNER JOIN workflow_stages
+         ON workflow_stages.template_id = customer_workflows.template_id
+       LEFT JOIN customer_stage_due_dates
+         ON customer_stage_due_dates.customer_workflow_id = customer_workflows.id
+        AND customer_stage_due_dates.stage_id = workflow_stages.id
+       WHERE customer_workflows.customer_id IN (${placeholders})
+         AND customer_workflows.status = 'active'
+       ORDER BY customer_workflows.customer_id, workflow_stages.sort_order, workflow_stages.id`,
+      customerIds,
+    )
     const [tagRows] = await pool.execute(
       `SELECT
          customer_tag_assignments.customer_id,
@@ -996,6 +1016,7 @@ async function listOverview(req, res, next) {
     const notificationsByCustomer = groupByCustomerId(notificationRows)
     const issuesByCustomer = groupByCustomerId(issueRows)
     const workflowStateByCustomer = groupWorkflowStateRows(workflowStateRows)
+    const stageDueDatesByCustomer = groupByCustomerId(stageDueDateRows)
 
     return res.json({
       customers: customerRows.map((row) => {
@@ -1008,6 +1029,11 @@ async function listOverview(req, res, next) {
           customerCode: row.customer_code,
           name: row.name,
           dueDate: formatDateInput(row.due_date),
+          stageDueDates: (stageDueDatesByCustomer.get(customerId) || []).map((item) => ({
+            dueDate: formatDateInput(item.due_date),
+            stageId: item.stage_id,
+            stageName: item.stage_name,
+          })),
           salesperson: row.salesperson || '',
           status: row.status,
           currentPhase: Math.max(0, Number(row.current_phase_order || 0) - 1),

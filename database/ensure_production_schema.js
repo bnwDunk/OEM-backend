@@ -158,6 +158,25 @@ async function ensureProductionSchema() {
       changes.push('workflow_stages.due_days')
     }
 
+    await connection.query(
+      `CREATE TABLE IF NOT EXISTS customer_stage_due_dates (
+        customer_workflow_id BIGINT UNSIGNED NOT NULL,
+        stage_id BIGINT UNSIGNED NOT NULL,
+        due_date DATE NULL DEFAULT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (customer_workflow_id, stage_id),
+        KEY customer_stage_due_dates_stage_id_index (stage_id),
+        KEY customer_stage_due_dates_due_date_index (due_date),
+        CONSTRAINT customer_stage_due_dates_workflow_id_foreign
+          FOREIGN KEY (customer_workflow_id) REFERENCES customer_workflows (id)
+          ON DELETE CASCADE,
+        CONSTRAINT customer_stage_due_dates_stage_id_foreign
+          FOREIGN KEY (stage_id) REFERENCES workflow_stages (id)
+          ON DELETE CASCADE
+      )`,
+    )
+
     if (await addColumnIfMissing(connection, 'customer_tags', 'color', 'color VARCHAR(30) NULL DEFAULT NULL AFTER name')) {
       changes.push('customer_tags.color')
     }
@@ -209,6 +228,16 @@ async function ensureProductionSchema() {
     if (await addColumnIfMissing(connection, 'customers', 'due_date', 'due_date DATE NULL DEFAULT NULL AFTER volume')) {
       changes.push('customers.due_date')
     }
+
+    await connection.query(
+      `INSERT IGNORE INTO customer_stage_due_dates (customer_workflow_id, stage_id, due_date)
+       SELECT customer_workflows.id, workflow_phases.stage_id, customers.due_date
+       FROM customer_workflows
+       INNER JOIN customers ON customers.id = customer_workflows.customer_id
+       INNER JOIN workflow_phases ON workflow_phases.id = customer_workflows.current_phase_id
+       WHERE customer_workflows.status = 'active'
+         AND customers.due_date IS NOT NULL`,
+    )
 
     if (await addColumnIfMissing(connection, 'customers', 'customer_code', 'customer_code VARCHAR(20) NULL DEFAULT NULL AFTER id')) {
       changes.push('customers.customer_code')

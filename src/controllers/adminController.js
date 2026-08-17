@@ -1773,7 +1773,7 @@ async function updateCustomer(req, res, next) {
 
   try {
     const { id } = req.params
-    const { costPackage, costSyrup, customerCode, dueDate, name, price, salesperson, status, tagsText, volume } = req.body
+    const { costPackage, costSyrup, customerCode, dueDate, name, price, salesperson, stageDueDates, status, tagsText, volume } = req.body
 
     if (status && !(await customerStatusExists(connection, status))) {
       return res.status(400).json({ message: 'Invalid customer status.' })
@@ -1840,6 +1840,72 @@ async function updateCustomer(req, res, next) {
       await replaceCustomerTags(connection, id, tagsText)
     }
 
+    if (stageDueDates !== undefined) {
+      if (!Array.isArray(stageDueDates)) {
+        const error = new Error('stageDueDates must be an array.')
+        error.statusCode = 400
+        throw error
+      }
+
+      const [workflowRows] = await connection.execute(
+        `SELECT id, template_id
+         FROM customer_workflows
+         WHERE customer_id = ? AND status = 'active'
+         LIMIT 1`,
+        [id],
+      )
+      const workflow = workflowRows[0]
+      if (!workflow) {
+        const error = new Error('Active customer workflow not found.')
+        error.statusCode = 404
+        throw error
+      }
+
+      const normalizedStageDueDates = stageDueDates.map((item) => {
+        const stageId = Number(item?.stageId)
+        const rawDueDate = String(item?.dueDate || '').trim()
+        const normalizedDate = normalizeDueDate(rawDueDate)
+        if (!Number.isInteger(stageId) || stageId < 1 || (rawDueDate && !normalizedDate)) {
+          const error = new Error('Each stage due date requires a valid stageId and YYYY-MM-DD date.')
+          error.statusCode = 400
+          throw error
+        }
+        return { dueDate: normalizedDate, stageId }
+      })
+      const uniqueStageIds = [...new Set(normalizedStageDueDates.map((item) => item.stageId))]
+      if (uniqueStageIds.length !== normalizedStageDueDates.length) {
+        const error = new Error('Duplicate stage due dates are not allowed.')
+        error.statusCode = 400
+        throw error
+      }
+
+      if (uniqueStageIds.length > 0) {
+        const placeholders = uniqueStageIds.map(() => '?').join(', ')
+        const [validStageRows] = await connection.execute(
+          `SELECT id FROM workflow_stages
+           WHERE template_id = ? AND id IN (${placeholders})`,
+          [workflow.template_id, ...uniqueStageIds],
+        )
+        if (validStageRows.length !== uniqueStageIds.length) {
+          const error = new Error('One or more stages do not belong to this customer workflow.')
+          error.statusCode = 400
+          throw error
+        }
+      }
+
+      await connection.execute(
+        'DELETE FROM customer_stage_due_dates WHERE customer_workflow_id = ?',
+        [workflow.id],
+      )
+      for (const item of normalizedStageDueDates.filter((entry) => entry.dueDate)) {
+        await connection.execute(
+          `INSERT INTO customer_stage_due_dates (customer_workflow_id, stage_id, due_date)
+           VALUES (?, ?, ?)`,
+          [workflow.id, item.stageId, item.dueDate],
+        )
+      }
+    }
+
     await connection.commit()
 
     await logAdminAction(req, {
@@ -1847,7 +1913,7 @@ async function updateCustomer(req, res, next) {
       entityType: 'system',
       entityId: Number(id),
       beforeData: beforeRows[0],
-      afterData: { costPackage, costSyrup, customerCode, dueDate, name, price, salesperson, status, tagsText, volume },
+      afterData: { costPackage, costSyrup, customerCode, dueDate, name, price, salesperson, stageDueDates, status, tagsText, volume },
     })
 
     return res.status(204).send()

@@ -26,6 +26,7 @@ const {
   uploadCustomerFile,
 } = require('../controllers/workflowController')
 const authenticate = require('../middleware/authenticate')
+const requireWebAdmin = require('../middleware/requireWebAdmin')
 
 const router = express.Router()
 
@@ -44,7 +45,7 @@ function restrictCustomerCodeToAdmin(req, res, next) {
 router.get('/overview', listOverview)
 router.get('/flows', listFlows)
 router.get('/flows/:id/structure', getFlowStructure)
-router.put('/flows/:flowId/order', updateFlowOrder)
+router.put('/flows/:flowId/order', requireWebAdmin, updateFlowOrder)
 router.post('/flows/:flowId/stages/:stageId/phases', createDepartmentPhase)
 router.put('/flows/:flowId/phases/:phaseId/branches/:branchId/items', updateFlowBranchItems)
 router.get('/customer-statuses', listCustomerStatuses)

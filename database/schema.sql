@@ -314,6 +314,23 @@ CREATE TABLE IF NOT EXISTS customer_phase_states (
     ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS customer_stage_due_dates (
+  customer_workflow_id BIGINT UNSIGNED NOT NULL,
+  stage_id BIGINT UNSIGNED NOT NULL,
+  due_date DATE NULL DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (customer_workflow_id, stage_id),
+  KEY customer_stage_due_dates_stage_id_index (stage_id),
+  KEY customer_stage_due_dates_due_date_index (due_date),
+  CONSTRAINT customer_stage_due_dates_workflow_id_foreign
+    FOREIGN KEY (customer_workflow_id) REFERENCES customer_workflows (id)
+    ON DELETE CASCADE,
+  CONSTRAINT customer_stage_due_dates_stage_id_foreign
+    FOREIGN KEY (stage_id) REFERENCES workflow_stages (id)
+    ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS customer_branch_states (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   customer_phase_state_id BIGINT UNSIGNED NOT NULL,
