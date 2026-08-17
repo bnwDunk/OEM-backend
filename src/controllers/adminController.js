@@ -354,7 +354,7 @@ async function logAdminAction(req, { action, entityType, entityId, beforeData, a
 
 async function getPhaseNotificationContext(connection, { customerId, phaseId }) {
   const [customerRows] = await connection.execute(
-    `SELECT id, name, slug
+    `SELECT id, customer_code, name, slug
      FROM customers
      WHERE id = ?
      LIMIT 1`,
@@ -367,7 +367,8 @@ async function getPhaseNotificationContext(connection, { customerId, phaseId }) 
        workflow_phases.label,
        workflow_phases.name,
        workflow_stages.stage_position,
-       workflow_stages.name AS stage_name
+       workflow_stages.name AS stage_name,
+       customer_stage_due_dates.due_date AS stage_due_date
      FROM workflow_phases
      INNER JOIN (
        SELECT
@@ -376,9 +377,16 @@ async function getPhaseNotificationContext(connection, { customerId, phaseId }) 
        FROM workflow_stages
      ) AS workflow_stages
        ON workflow_stages.id = workflow_phases.stage_id
+     LEFT JOIN customer_workflows
+       ON customer_workflows.customer_id = ?
+      AND customer_workflows.template_id = workflow_stages.template_id
+      AND customer_workflows.status = 'active'
+     LEFT JOIN customer_stage_due_dates
+       ON customer_stage_due_dates.customer_workflow_id = customer_workflows.id
+      AND customer_stage_due_dates.stage_id = workflow_phases.stage_id
      WHERE workflow_phases.id = ?
      LIMIT 1`,
-    [phaseId],
+    [customerId, phaseId],
   )
 
   const [departmentRows] = await connection.execute(
@@ -480,7 +488,9 @@ async function sendCustomerCreatedNotification({ actorUserId, notification }) {
 
   try {
     const result = await sendPhaseAdvancedEmail({
+      customerCode: notification.customer.customer_code,
       customerName: notification.customer.name,
+      customerReference: notification.customer.slug || notification.customer.id,
       nextPhase: notification.phase,
       recipients: notification.recipients,
     })
@@ -1646,11 +1656,77 @@ async function createCustomerProjectForFlow(connection, { createdByUserId, flowI
   }
 }
 
+async function replaceCustomerStageDueDates(connection, customerId, stageDueDates) {
+  if (!Array.isArray(stageDueDates)) {
+    const error = new Error('stageDueDates must be an array.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const [workflowRows] = await connection.execute(
+    `SELECT id, template_id
+     FROM customer_workflows
+     WHERE customer_id = ? AND status = 'active'
+     LIMIT 1`,
+    [customerId],
+  )
+  const workflow = workflowRows[0]
+  if (!workflow) {
+    const error = new Error('Active customer workflow not found.')
+    error.statusCode = 404
+    throw error
+  }
+
+  const normalizedStageDueDates = stageDueDates.map((item) => {
+    const stageId = Number(item?.stageId)
+    const rawDueDate = String(item?.dueDate || '').trim()
+    const normalizedDate = normalizeDueDate(rawDueDate)
+    if (!Number.isInteger(stageId) || stageId < 1 || (rawDueDate && !normalizedDate)) {
+      const error = new Error('Each stage due date requires a valid stageId and YYYY-MM-DD date.')
+      error.statusCode = 400
+      throw error
+    }
+    return { dueDate: normalizedDate, stageId }
+  })
+  const uniqueStageIds = [...new Set(normalizedStageDueDates.map((item) => item.stageId))]
+  if (uniqueStageIds.length !== normalizedStageDueDates.length) {
+    const error = new Error('Duplicate stage due dates are not allowed.')
+    error.statusCode = 400
+    throw error
+  }
+
+  if (uniqueStageIds.length > 0) {
+    const placeholders = uniqueStageIds.map(() => '?').join(', ')
+    const [validStageRows] = await connection.execute(
+      `SELECT id FROM workflow_stages
+       WHERE template_id = ? AND id IN (${placeholders})`,
+      [workflow.template_id, ...uniqueStageIds],
+    )
+    if (validStageRows.length !== uniqueStageIds.length) {
+      const error = new Error('One or more stages do not belong to this customer workflow.')
+      error.statusCode = 400
+      throw error
+    }
+  }
+
+  await connection.execute(
+    'DELETE FROM customer_stage_due_dates WHERE customer_workflow_id = ?',
+    [workflow.id],
+  )
+  for (const item of normalizedStageDueDates.filter((entry) => entry.dueDate)) {
+    await connection.execute(
+      `INSERT INTO customer_stage_due_dates (customer_workflow_id, stage_id, due_date)
+       VALUES (?, ?, ?)`,
+      [workflow.id, item.stageId, item.dueDate],
+    )
+  }
+}
+
 async function createCustomer(req, res, next) {
   const connection = await pool.getConnection()
 
   try {
-    const { flowId, name } = req.body
+    const { flowId, name, stageDueDates } = req.body
     if (!name) return res.status(400).json({ message: 'name is required.' })
 
     await connection.beginTransaction()
@@ -1666,6 +1742,9 @@ async function createCustomer(req, res, next) {
       flowId: templateId,
       name,
     })
+    if (stageDueDates !== undefined) {
+      await replaceCustomerStageDueDates(connection, customer.id, stageDueDates)
+    }
     const notification = await getPhaseNotificationContext(connection, {
       customerId: customer.id,
       phaseId: customer.firstPhaseId,
@@ -1836,69 +1915,7 @@ async function updateCustomer(req, res, next) {
     }
 
     if (stageDueDates !== undefined) {
-      if (!Array.isArray(stageDueDates)) {
-        const error = new Error('stageDueDates must be an array.')
-        error.statusCode = 400
-        throw error
-      }
-
-      const [workflowRows] = await connection.execute(
-        `SELECT id, template_id
-         FROM customer_workflows
-         WHERE customer_id = ? AND status = 'active'
-         LIMIT 1`,
-        [id],
-      )
-      const workflow = workflowRows[0]
-      if (!workflow) {
-        const error = new Error('Active customer workflow not found.')
-        error.statusCode = 404
-        throw error
-      }
-
-      const normalizedStageDueDates = stageDueDates.map((item) => {
-        const stageId = Number(item?.stageId)
-        const rawDueDate = String(item?.dueDate || '').trim()
-        const normalizedDate = normalizeDueDate(rawDueDate)
-        if (!Number.isInteger(stageId) || stageId < 1 || (rawDueDate && !normalizedDate)) {
-          const error = new Error('Each stage due date requires a valid stageId and YYYY-MM-DD date.')
-          error.statusCode = 400
-          throw error
-        }
-        return { dueDate: normalizedDate, stageId }
-      })
-      const uniqueStageIds = [...new Set(normalizedStageDueDates.map((item) => item.stageId))]
-      if (uniqueStageIds.length !== normalizedStageDueDates.length) {
-        const error = new Error('Duplicate stage due dates are not allowed.')
-        error.statusCode = 400
-        throw error
-      }
-
-      if (uniqueStageIds.length > 0) {
-        const placeholders = uniqueStageIds.map(() => '?').join(', ')
-        const [validStageRows] = await connection.execute(
-          `SELECT id FROM workflow_stages
-           WHERE template_id = ? AND id IN (${placeholders})`,
-          [workflow.template_id, ...uniqueStageIds],
-        )
-        if (validStageRows.length !== uniqueStageIds.length) {
-          const error = new Error('One or more stages do not belong to this customer workflow.')
-          error.statusCode = 400
-          throw error
-        }
-      }
-
-      await connection.execute(
-        'DELETE FROM customer_stage_due_dates WHERE customer_workflow_id = ?',
-        [workflow.id],
-      )
-      for (const item of normalizedStageDueDates.filter((entry) => entry.dueDate)) {
-        await connection.execute(
-          `INSERT INTO customer_stage_due_dates (customer_workflow_id, stage_id, due_date)
-           VALUES (?, ?, ?)`,
-          [workflow.id, item.stageId, item.dueDate],
-        )
-      }
+      await replaceCustomerStageDueDates(connection, id, stageDueDates)
     }
 
     await connection.commit()

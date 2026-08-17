@@ -618,7 +618,8 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
        workflow_phases.name,
        workflow_phases.global_order,
        workflow_stages.stage_position,
-       workflow_stages.name AS stage_name
+       workflow_stages.name AS stage_name,
+       customer_stage_due_dates.due_date AS stage_due_date
      FROM workflow_phases
      INNER JOIN (
        SELECT
@@ -629,6 +630,9 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
        ON workflow_stages.id = workflow_phases.stage_id
      INNER JOIN customer_workflows
        ON customer_workflows.template_id = workflow_stages.template_id
+     LEFT JOIN customer_stage_due_dates
+       ON customer_stage_due_dates.customer_workflow_id = customer_workflows.id
+      AND customer_stage_due_dates.stage_id = workflow_phases.stage_id
      WHERE customer_workflows.id = ?
        AND workflow_phases.id = ?
      LIMIT 1`,
@@ -1170,6 +1174,26 @@ async function getCustomerFile(req, res, next) {
       'X-Content-Type-Options': 'nosniff',
     })
     return res.send(file.file_data)
+  } catch (error) {
+    return next(error)
+  }
+}
+
+async function deleteCustomerFile(req, res, next) {
+  try {
+    const customerId = Number(req.params.id)
+    const fileId = Number(req.params.fileId)
+    if (!customerId || !fileId) {
+      return res.status(400).json({ message: 'Customer and file ids are required.' })
+    }
+
+    const [result] = await pool.execute(
+      'DELETE FROM customer_files WHERE id = ? AND customer_id = ?',
+      [fileId, customerId],
+    )
+    if (!result.affectedRows) return res.status(404).json({ message: 'Customer file not found.' })
+
+    return res.status(204).send()
   } catch (error) {
     return next(error)
   }
@@ -2280,6 +2304,7 @@ module.exports = {
   completeBranch,
   createDepartmentPhase,
   createIssue,
+  deleteCustomerFile,
   getFlowStructure,
   getCustomerFile,
   listFlows,

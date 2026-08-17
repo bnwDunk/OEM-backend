@@ -44,6 +44,8 @@ const env = {
     pass: process.env.SMTP_PASS || '',
     from: process.env.MAIL_FROM || process.env.SMTP_USER || '',
     appUrl: process.env.APP_URL || process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+    reminderIntervalMs: Math.max(60_000, Number(process.env.STAGE_DUE_REMINDER_INTERVAL_MS || 3_600_000)),
+    reminderTimeZone: process.env.STAGE_DUE_REMINDER_TIMEZONE || 'Asia/Bangkok',
   },
 }
 

@@ -29,11 +29,12 @@ const {
   updateUser,
 } = require('../controllers/adminController')
 const authenticate = require('../middleware/authenticate')
+const changeEmailNotification = require('../middleware/changeEmailNotification')
 const requireAdmin = require('../middleware/requireAdmin')
 
 const router = express.Router()
 
-router.use(authenticate, requireAdmin)
+router.use(authenticate, requireAdmin, changeEmailNotification)
 
 router.get('/users', listUsers)
 router.post('/users', createUser)
