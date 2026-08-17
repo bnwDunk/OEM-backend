@@ -871,11 +871,15 @@ async function listOverview(req, res, next) {
          customers.volume,
          COALESCE(current_stage_due_dates.due_date, customers.due_date) AS due_date,
          customers.salesperson,
+         customer_workflows.template_id AS flow_id,
+         workflow_templates.name AS flow_name,
          COALESCE(current_phase.global_order, first_phase.global_order, 0) AS current_phase_order
        FROM customers
        LEFT JOIN customer_workflows
          ON customer_workflows.customer_id = customers.id
         AND customer_workflows.status = 'active'
+       LEFT JOIN workflow_templates
+         ON workflow_templates.id = customer_workflows.template_id
        LEFT JOIN workflow_phases AS current_phase
          ON current_phase.id = customer_workflows.current_phase_id
        LEFT JOIN customer_stage_due_dates AS current_stage_due_dates
@@ -1026,6 +1030,8 @@ async function listOverview(req, res, next) {
           id: row.slug || customerId,
           databaseId: row.id,
           customerCode: row.customer_code,
+          flowId: row.flow_id,
+          flowName: row.flow_name,
           name: row.name,
           dueDate: formatDateInput(row.due_date),
           stageDueDates: (stageDueDatesByCustomer.get(customerId) || []).map((item) => ({
