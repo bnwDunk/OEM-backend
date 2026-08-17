@@ -26,7 +26,6 @@ const {
   updateDepartment,
   updateFlow,
   updateFlowStructure,
-  updateStageDueDate,
   updateUser,
 } = require('../controllers/adminController')
 const authenticate = require('../middleware/authenticate')
@@ -51,7 +50,6 @@ router.patch('/flows/:id', updateFlow)
 router.delete('/flows/:id', deleteFlow)
 router.get('/flows/:id/structure', getFlowStructure)
 router.put('/flows/:id/structure', updateFlowStructure)
-router.patch('/flows/:flowId/stages/:stageId/due-date', updateStageDueDate)
 
 router.get('/customers', listCustomers)
 router.post('/customers', createCustomer)

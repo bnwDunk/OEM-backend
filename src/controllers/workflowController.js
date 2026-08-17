@@ -373,10 +373,10 @@ async function getFlowStructure(req, res, next) {
     if (!flowRows[0]) return res.status(404).json({ message: 'Workflow not found.' })
 
     const [stageRows] = await pool.execute(
-      `SELECT id, name, due_days, sort_order
+      `SELECT id, name
        FROM workflow_stages
        WHERE template_id = ?
-       ORDER BY sort_order ASC, id ASC`,
+       ORDER BY id ASC`,
       [id],
     )
 
@@ -480,7 +480,6 @@ async function getFlowStructure(req, res, next) {
     return res.json({
       flow: flowRows[0],
       stages: stageRows.map((stage) => ({
-        dueDays: stage.due_days === null ? null : Number(stage.due_days),
         id: stage.id,
         name: stage.name,
         phases: phasesByStage.get(stage.id) || [],
@@ -624,7 +623,7 @@ async function getPhaseNotificationContext(connection, { customerId, customerWor
      INNER JOIN (
        SELECT
          workflow_stages.*,
-         ROW_NUMBER() OVER (PARTITION BY workflow_stages.template_id ORDER BY workflow_stages.sort_order ASC, workflow_stages.id ASC) AS stage_position
+         ROW_NUMBER() OVER (PARTITION BY workflow_stages.template_id ORDER BY workflow_stages.id ASC) AS stage_position
        FROM workflow_stages
      ) AS workflow_stages
        ON workflow_stages.id = workflow_phases.stage_id
@@ -912,7 +911,7 @@ async function listOverview(req, res, next) {
         AND customer_stage_due_dates.stage_id = workflow_stages.id
        WHERE customer_workflows.customer_id IN (${placeholders})
          AND customer_workflows.status = 'active'
-       ORDER BY customer_workflows.customer_id, workflow_stages.sort_order, workflow_stages.id`,
+       ORDER BY customer_workflows.customer_id, workflow_stages.id`,
       customerIds,
     )
     const [tagRows] = await pool.execute(
@@ -1200,7 +1199,7 @@ async function createDepartmentPhase(req, res, next) {
     await connection.beginTransaction()
 
     const [stageRows] = await connection.execute(
-      `SELECT workflow_stages.id, workflow_stages.sort_order
+      `SELECT workflow_stages.id
        FROM workflow_stages
        INNER JOIN workflow_templates
          ON workflow_templates.id = workflow_stages.template_id
@@ -1239,11 +1238,8 @@ async function createDepartmentPhase(req, res, next) {
        LEFT JOIN workflow_phases
          ON workflow_phases.stage_id = workflow_stages.id
        WHERE workflow_stages.template_id = ?
-         AND (
-           workflow_stages.sort_order < ?
-           OR workflow_stages.id = ?
-         )`,
-      [stageId, flowId, stage.sort_order, stageId],
+         AND workflow_stages.id <= ?`,
+      [stageId, flowId, stageId],
     )
     const phaseSortOrder = Number(positionRows[0]?.stage_sort_order || 0) + 10
     const globalOrder = Number(positionRows[0]?.previous_global_order || 0) + 1
@@ -1606,7 +1602,7 @@ async function createIssue(req, res, next) {
              workflow_stages.*,
              ROW_NUMBER() OVER (
                PARTITION BY workflow_stages.template_id
-               ORDER BY workflow_stages.sort_order ASC, workflow_stages.id ASC
+               ORDER BY workflow_stages.id ASC
              ) AS stage_position
            FROM workflow_stages
          ) AS workflow_stages
@@ -2194,10 +2190,12 @@ async function updateFlowOrder(req, res, next) {
   try {
     const flowId = Number(req.params.flowId)
     const stages = Array.isArray(req.body.stages) ? req.body.stages : []
-    const requestedStages = stages.map((stage) => ({
-      id: Number(stage.id),
-      phaseIds: Array.isArray(stage.phaseIds) ? stage.phaseIds.map(Number) : [],
-    }))
+    const requestedStages = stages
+      .map((stage) => ({
+        id: Number(stage.id),
+        phaseIds: Array.isArray(stage.phaseIds) ? stage.phaseIds.map(Number) : [],
+      }))
+      .sort((left, right) => left.id - right.id)
 
     if (!flowId || requestedStages.length === 0 || requestedStages.some((stage) => !stage.id || stage.phaseIds.some((id) => !id))) {
       return res.status(400).json({ message: 'A complete stage and phase order is required.' })
@@ -2237,13 +2235,6 @@ async function updateFlowOrder(req, res, next) {
       return res.status(400).json({ message: 'The submitted phase order is incomplete or invalid.' })
     }
 
-    for (const [stageIndex, stage] of requestedStages.entries()) {
-      await connection.execute(
-        'UPDATE workflow_stages SET sort_order = ? WHERE id = ? AND template_id = ?',
-        [1000000 + stageIndex, stage.id, flowId],
-      )
-    }
-
     let temporaryPhaseOrder = 1
     for (const stage of requestedStages) {
       for (const phaseId of stage.phaseIds) {
@@ -2256,11 +2247,7 @@ async function updateFlowOrder(req, res, next) {
     }
 
     let globalOrder = 1
-    for (const [stageIndex, stage] of requestedStages.entries()) {
-      await connection.execute(
-        'UPDATE workflow_stages SET sort_order = ? WHERE id = ? AND template_id = ?',
-        [(stageIndex + 1) * 10, stage.id, flowId],
-      )
+    for (const stage of requestedStages) {
       for (const [phaseIndex, phaseId] of stage.phaseIds.entries()) {
         await connection.execute(
           'UPDATE workflow_phases SET global_order = ?, sort_order = ? WHERE id = ? AND stage_id = ?',
@@ -2272,7 +2259,7 @@ async function updateFlowOrder(req, res, next) {
 
     await connection.execute('UPDATE workflow_templates SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [flowId])
     await connection.commit()
-    return res.json({ reordered: true })
+    return res.json({ reordered: true, stageOrder: 'id' })
   } catch (error) {
     await connection.rollback()
     return next(error)

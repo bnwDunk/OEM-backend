@@ -372,7 +372,7 @@ async function getPhaseNotificationContext(connection, { customerId, phaseId }) 
      INNER JOIN (
        SELECT
          workflow_stages.*,
-         ROW_NUMBER() OVER (PARTITION BY workflow_stages.template_id ORDER BY workflow_stages.sort_order ASC, workflow_stages.id ASC) AS stage_position
+         ROW_NUMBER() OVER (PARTITION BY workflow_stages.template_id ORDER BY workflow_stages.id ASC) AS stage_position
        FROM workflow_stages
      ) AS workflow_stages
        ON workflow_stages.id = workflow_phases.stage_id
@@ -838,10 +838,10 @@ async function getFlowStructure(req, res, next) {
     if (!flowRows[0]) return res.status(404).json({ message: 'Flow not found.' })
 
     const [stageRows] = await pool.execute(
-      `SELECT id, name, due_days, sort_order
+      `SELECT id, name
        FROM workflow_stages
        WHERE template_id = ?
-       ORDER BY sort_order ASC, id ASC`,
+       ORDER BY id ASC`,
       [id],
     )
 
@@ -900,7 +900,6 @@ async function getFlowStructure(req, res, next) {
     return res.json({
       flow: flowRows[0],
       stages: stageRows.map((stage) => ({
-        dueDays: stage.due_days === null ? null : Number(stage.due_days),
         id: stage.id,
         name: stage.name,
         phases: phasesByStage.get(stage.id) || [],
@@ -922,6 +921,12 @@ async function updateFlowStructure(req, res, next) {
       return res.status(400).json({ message: 'At least one stage is required.' })
     }
 
+    const orderedStages = [...stages].sort((left, right) => {
+      const leftId = Number(left.id) || Number.MAX_SAFE_INTEGER
+      const rightId = Number(right.id) || Number.MAX_SAFE_INTEGER
+      return leftId - rightId
+    })
+
     await connection.beginTransaction()
 
     const [flowRows] = await connection.execute(
@@ -937,7 +942,7 @@ async function updateFlowStructure(req, res, next) {
       'SELECT id FROM workflow_stages WHERE template_id = ?',
       [id],
     )
-    const requestedStageIds = new Set(stages.map((stage) => Number(stage.id)).filter(Boolean))
+    const requestedStageIds = new Set(orderedStages.map((stage) => Number(stage.id)).filter(Boolean))
 
     for (const stage of existingStages) {
       if (!requestedStageIds.has(Number(stage.id))) {
@@ -945,38 +950,28 @@ async function updateFlowStructure(req, res, next) {
       }
     }
 
-    for (const [index, stage] of stages.entries()) {
-      if (stage.id) {
-        await connection.execute(
-          'UPDATE workflow_stages SET sort_order = ? WHERE id = ? AND template_id = ?',
-          [100000 + index, stage.id, id],
-        )
-      }
-    }
-
     let globalOrder = 1
 
-    for (const [stageIndex, stage] of stages.entries()) {
+    for (const stage of orderedStages) {
       const stageName = String(stage.name || '').trim()
       if (!stageName) {
         await connection.rollback()
         return res.status(400).json({ message: 'Stage name is required.' })
       }
 
-      const stageSortOrder = (stageIndex + 1) * 10
       let stageId = Number(stage.id) || null
 
       if (stageId) {
         await connection.execute(
           `UPDATE workflow_stages
-           SET name = ?, sort_order = ?
+           SET name = ?
            WHERE id = ? AND template_id = ?`,
-          [stageName, stageSortOrder, stageId, id],
+          [stageName, stageId, id],
         )
       } else {
         const [stageResult] = await connection.execute(
-          'INSERT INTO workflow_stages (template_id, name, sort_order) VALUES (?, ?, ?)',
-          [id, stageName, stageSortOrder],
+          'INSERT INTO workflow_stages (template_id, name) VALUES (?, ?)',
+          [id, stageName],
         )
         stageId = stageResult.insertId
       }
@@ -1449,14 +1444,14 @@ async function deleteTag(req, res, next) {
 
 async function cloneFlowTemplate(connection, sourceFlowId, newTemplateId) {
   const [stages] = await connection.execute(
-    'SELECT id, name, due_days, sort_order FROM workflow_stages WHERE template_id = ? ORDER BY sort_order ASC',
+    'SELECT id, name FROM workflow_stages WHERE template_id = ? ORDER BY id ASC',
     [sourceFlowId],
   )
 
   for (const stage of stages) {
     const [stageResult] = await connection.execute(
-      'INSERT INTO workflow_stages (template_id, name, due_days, sort_order) VALUES (?, ?, ?, ?)',
-      [newTemplateId, stage.name, stage.due_days, stage.sort_order],
+      'INSERT INTO workflow_stages (template_id, name) VALUES (?, ?)',
+      [newTemplateId, stage.name],
     )
 
     const [phases] = await connection.execute(
@@ -2051,44 +2046,6 @@ async function deleteFlow(req, res, next) {
   }
 }
 
-async function updateStageDueDate(req, res, next) {
-  try {
-    const flowId = Number(req.params.flowId)
-    const stageId = Number(req.params.stageId)
-    const rawDueDays = req.body.dueDays
-    const dueDays = rawDueDays === null || rawDueDays === '' ? null : Number(rawDueDays)
-
-    if (!flowId || !stageId) return res.status(400).json({ message: 'Flow and stage ids are required.' })
-    if (dueDays !== null && (!Number.isInteger(dueDays) || dueDays < 1 || dueDays > 3650)) {
-      return res.status(400).json({ message: 'Due days must be a whole number between 1 and 3650.' })
-    }
-
-    const [beforeRows] = await pool.execute(
-      'SELECT id, due_days FROM workflow_stages WHERE id = ? AND template_id = ? LIMIT 1',
-      [stageId, flowId],
-    )
-    if (!beforeRows[0]) return res.status(404).json({ message: 'Workflow stage not found.' })
-
-    await pool.execute(
-      'UPDATE workflow_stages SET due_days = ? WHERE id = ? AND template_id = ?',
-      [dueDays, stageId, flowId],
-    )
-    await pool.execute('UPDATE workflow_templates SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [flowId])
-
-    await logAdminAction(req, {
-      action: 'update_stage_due_date',
-      entityType: 'system',
-      entityId: stageId,
-      beforeData: { dueDays: beforeRows[0].due_days },
-      afterData: { dueDays },
-    })
-
-    return res.json({ dueDays, stageId })
-  } catch (error) {
-    return next(error)
-  }
-}
-
 module.exports = {
   createDepartment,
   createCustomer,
@@ -2116,6 +2073,5 @@ module.exports = {
   updateDepartment,
   updateFlow,
   updateFlowStructure,
-  updateStageDueDate,
   updateUser,
 }

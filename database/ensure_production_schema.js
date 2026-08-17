@@ -23,6 +23,13 @@ async function addColumnIfMissing(connection, tableName, columnName, definition)
   return true
 }
 
+async function dropColumnIfExists(connection, tableName, columnName) {
+  if (!(await columnExists(connection, tableName, columnName))) return false
+
+  await connection.query(`ALTER TABLE ${tableName} DROP COLUMN ${columnName}`)
+  return true
+}
+
 async function indexExists(connection, tableName, indexName) {
   const [rows] = await connection.execute(
     `SELECT COUNT(*) AS count
@@ -47,6 +54,13 @@ async function constraintExists(connection, tableName, constraintName) {
   )
 
   return Number(rows[0].count) > 0
+}
+
+async function dropIndexIfExists(connection, tableName, indexName) {
+  if (!(await indexExists(connection, tableName, indexName))) return false
+
+  await connection.query(`ALTER TABLE ${tableName} DROP INDEX ${indexName}`)
+  return true
 }
 
 function makeCustomerCodePrefix(value) {
@@ -154,8 +168,18 @@ async function ensureProductionSchema() {
          AND users.department_id IS NOT NULL`,
     )
 
-    if (await addColumnIfMissing(connection, 'workflow_stages', 'due_days', 'due_days INT UNSIGNED NULL DEFAULT NULL AFTER name')) {
-      changes.push('workflow_stages.due_days')
+    if (!(await indexExists(connection, 'workflow_stages', 'workflow_stages_template_id_index'))) {
+      await connection.query('ALTER TABLE workflow_stages ADD INDEX workflow_stages_template_id_index (template_id)')
+      changes.push('workflow_stages_template_id_index')
+    }
+    if (await dropIndexIfExists(connection, 'workflow_stages', 'workflow_stages_template_sort_unique')) {
+      changes.push('removed workflow_stages_template_sort_unique')
+    }
+    if (await dropColumnIfExists(connection, 'workflow_stages', 'due_days')) {
+      changes.push('removed workflow_stages.due_days')
+    }
+    if (await dropColumnIfExists(connection, 'workflow_stages', 'sort_order')) {
+      changes.push('removed workflow_stages.sort_order')
     }
 
     await connection.query(
