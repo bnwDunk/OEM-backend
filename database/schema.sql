@@ -198,6 +198,7 @@ CREATE TABLE IF NOT EXISTS workflow_stages (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   template_id BIGINT UNSIGNED NOT NULL,
   name VARCHAR(190) NOT NULL,
+  due_days INT UNSIGNED NULL DEFAULT NULL,
   sort_order INT UNSIGNED NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -311,6 +312,23 @@ CREATE TABLE IF NOT EXISTS customer_phase_states (
   CONSTRAINT customer_phase_states_reset_by_user_id_foreign
     FOREIGN KEY (reset_by_user_id) REFERENCES users (id)
     ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS customer_stage_due_dates (
+  customer_workflow_id BIGINT UNSIGNED NOT NULL,
+  stage_id BIGINT UNSIGNED NOT NULL,
+  due_date DATE NULL DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (customer_workflow_id, stage_id),
+  KEY customer_stage_due_dates_stage_id_index (stage_id),
+  KEY customer_stage_due_dates_due_date_index (due_date),
+  CONSTRAINT customer_stage_due_dates_workflow_id_foreign
+    FOREIGN KEY (customer_workflow_id) REFERENCES customer_workflows (id)
+    ON DELETE CASCADE,
+  CONSTRAINT customer_stage_due_dates_stage_id_foreign
+    FOREIGN KEY (stage_id) REFERENCES workflow_stages (id)
+    ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS customer_branch_states (
